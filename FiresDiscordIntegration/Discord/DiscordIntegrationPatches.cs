@@ -18,7 +18,7 @@ namespace FiresDiscordIntegration.Discord
     ///  - Chat.OnNewChatMessage → PlayerShout
     ///  - EnvMan.UpdateTriggers → NewDay
     ///  - ZNet.Update          → Hourly summary tick
-    ///  - RandEventSystem.SetActiveEvent → Random event start
+    ///  - RandEventSystem.SetRandomEvent → Random event start / stop
     ///
     /// All patches check IsServer() before sending webhooks.
     /// All patches are wrapped in try/catch to prevent Harmony failures from
@@ -250,40 +250,23 @@ namespace FiresDiscordIntegration.Discord
                     FiresLogger.LogVerbose("[Discord] Chat patch skipped: not on server");
                     return;
                 }
-                if (string.IsNullOrEmpty(sender?.Name))
-                {
-                    FiresLogger.LogVerbose("[Discord] Chat patch skipped: empty sender name");
-                    return;
-                }
-                if (string.IsNullOrEmpty(text))
-                {
-                    FiresLogger.LogVerbose("[Discord] Chat patch skipped: empty text");
-                    return;
-                }
-
-                // Don't echo Discord bot relay messages back to Discord — those are
-                // shouts the bot listener already sent into the game; reflecting them
-                // would loop the message between Discord and the chat channel.  The
-                // sender Name is the encoded "[Discord]" / "[Discord]|#RRGGBB" form
-                // RelayToGameChat writes; matching the prefix covers both spellings.
-                if (sender.Name.StartsWith("[Discord]", StringComparison.OrdinalIgnoreCase))
-                {
-                    FiresLogger.LogVerbose("[Discord] Chat patch skipped: echo from Discord relay");
-                    return;
-                }
 
                 if (type == Talker.Type.Shout)
                 {
-                    DiscordStatusTracker.RecordShout();
-                    DiscordIntegrationCore.OnPlayerChat(sender.Name, text, DiscordIntegrationCore.ChatLineType.Shout);
+                    RelayShout(sender?.Name, senderID, text, "Chat");
+                    return;
                 }
-                else if (type == Talker.Type.Normal)
+
+                // A sender with no name in its UserInfo still has one on its peer (1.0.26).
+                string name = !string.IsNullOrEmpty(sender?.Name) ? sender.Name : PeerName(senderID);
+                if (!RelayableChat(name, text, senderID)) return;
+                if (type == Talker.Type.Normal)
                 {
-                    DiscordIntegrationCore.OnPlayerChat(sender.Name, text, DiscordIntegrationCore.ChatLineType.Say);
+                    DiscordIntegrationCore.OnPlayerChat(name, text, DiscordIntegrationCore.ChatLineType.Say);
                 }
                 else if (type == Talker.Type.Whisper)
                 {
-                    DiscordIntegrationCore.OnPlayerChat(sender.Name, text, DiscordIntegrationCore.ChatLineType.Whisper);
+                    DiscordIntegrationCore.OnPlayerChat(name, text, DiscordIntegrationCore.ChatLineType.Whisper);
                 }
                 else
                 {
@@ -295,6 +278,109 @@ namespace FiresDiscordIntegration.Discord
                 Debug.LogWarning($"[Discord] OnNewChatMessage webhook error: {ex.Message}");
             }
         }
+
+        // A user's Linux dedicated server, via Fire: shouts never reached Discord while everything else did; it reproduced on our rig
+        // dedi (R38 on 1.0.26, R39 on 1.0.27). Valheim 1.0 sends a shout ONCE PER RECIPIENT: Chat.SendText ->
+        // CheckPermissionsAndSendChatMessageRPCsAsync -> InvokeRoutedRPC(recipient, "ChatMessage") for each permitted player. The
+        // shouter's own copy never leaves its machine, and the server only routes the others on (RouteRPC), so the server's Chat
+        // never handles a shout. 1.0.28 relays shouts three ways, de-duplicated by RelayShout:
+        // - the shouter's client sends it to the server (ChatRelayRpc, as Say/Whisper always were; needs FDI on that client);
+        // - a copy the server routes on to another player (RouteRPC below; works for a client without FDI while anyone else is on);
+        // - a copy the server itself handles (HandleRoutedRPC; a listen host's own shout).
+        private static readonly int ChatMessageHash = "ChatMessage".GetStableHashCode();
+        private static bool _loggedRpcShoutPath;
+
+        [HarmonyPatch(typeof(ZRoutedRpc), "HandleRoutedRPC")]
+        [HarmonyPrefix]
+        public static void ZRoutedRpc_HandleRoutedRPC_Prefix(ZRoutedRpc.RoutedRPCData data) => ShoutFromRoutedRpc(data, "handled ChatMessage");
+
+        [HarmonyPatch(typeof(ZRoutedRpc), "RouteRPC")]
+        [HarmonyPrefix]
+        public static void ZRoutedRpc_RouteRPC_Prefix(ZRoutedRpc.RoutedRPCData rpcData) => ShoutFromRoutedRpc(rpcData, "routed ChatMessage");
+
+        private static void ShoutFromRoutedRpc(ZRoutedRpc.RoutedRPCData data, string via)
+        {
+            if (data == null || data.m_methodHash != ChatMessageHash) return;
+            try
+            {
+                if (ZNet.instance == null || !ZNet.instance.IsServer()) return;
+                // Register<Vector3, int, UserInfo, string>: the order ZRpc serialised them in.
+                var pkg = new ZPackage(data.m_parameters.GetArray());
+                pkg.ReadVector3();
+                var type = (Talker.Type)pkg.ReadInt();
+                var user = new UserInfo();
+                user.Deserialize(ref pkg);
+                string text = pkg.ReadString();
+                if (type != Talker.Type.Shout) return;
+                if (!_loggedRpcShoutPath)
+                {
+                    _loggedRpcShoutPath = true;
+                    Debug.Log($"[Discord] shout relay: first ChatMessage shout seen on the server ({via}).");
+                }
+                RelayShout(user.Name, data.m_senderPeerID, text, via);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Discord] ChatMessage shout relay error ({via}): {ex.Message}");
+            }
+        }
+
+        // One shout reaches the server several ways (the client relay, one routed copy per other player, a listen host's own copy):
+        // one post per sender and text inside this window.
+        private const float ShoutDedupSeconds = 5f;
+        private static readonly Dictionary<string, float> _recentShouts = new Dictionary<string, float>();
+
+        internal static void RelayShout(string name, long senderPeer, string text, string via)
+        {
+            if (string.IsNullOrEmpty(name)) name = PeerName(senderPeer);
+            if (!RelayableChat(name, text, senderPeer)) return;
+            float now = Time.realtimeSinceStartup;
+            string key = name + "\n" + text;
+            if (_recentShouts.TryGetValue(key, out float seen) && now - seen < ShoutDedupSeconds)
+            {
+                // Said too, so a proof round shows every path that saw the shout, not only the one that posted it.
+                Debug.Log($"[Discord] shout from '{name}' (peer {senderPeer}) also arrived via {via}: already relayed, not posted again");
+                return;
+            }
+            if (_recentShouts.Count > 64) _recentShouts.Clear();
+            _recentShouts[key] = now;
+
+            Debug.Log($"[Discord] shout from '{name}' (peer {senderPeer}) via {via}");
+            DiscordStatusTracker.RecordShout();
+            bool relays = DiscordIntegrationCore.WillRelay(DiscordIntegrationCore.ChatLineType.Shout, text);
+            DiscordIntegrationCore.OnPlayerChat(name, text, DiscordIntegrationCore.ChatLineType.Shout);
+            if (relays) FiresDiscordIntegration.ChatRelay.ChatRelayRpc.TellRelayed(senderPeer, text);
+        }
+
+        // Skips are said once each at the normal log level: a server whose chat never reaches Discord can be read from a plain log.
+        private static readonly HashSet<string> _loggedSkips = new HashSet<string>();
+
+        private static bool RelayableChat(string name, string text, long senderPeer)
+        {
+            if (string.IsNullOrEmpty(name))
+            {
+                SkipOnce("empty sender name", $"a chat line from peer {senderPeer} has no sender name, in its UserInfo or on its peer");
+                return false;
+            }
+            if (string.IsNullOrEmpty(text)) return false;
+            // Don't echo Discord bot relay messages back to Discord: those are lines the bot listener already sent into the game,
+            // and reflecting them would loop between Discord and the chat channel. RelayToGameChat writes the sender as
+            // "[Discord]" or "[Discord]|#RRGGBB"; the prefix covers both.
+            if (name.StartsWith("[Discord]", StringComparison.OrdinalIgnoreCase))
+            {
+                FiresLogger.LogVerbose("[Discord] Chat patch skipped: echo from Discord relay");
+                return false;
+            }
+            return true;
+        }
+
+        private static void SkipOnce(string key, string why)
+        {
+            if (!_loggedSkips.Add(key)) return;
+            Debug.Log($"[Discord] chat relay skipped: {why} (said once per session)");
+        }
+
+        private static string PeerName(long peerId) => ZNet.instance?.GetPeer(peerId)?.m_playerName;
 
         // ────────────────────────────────────────────────────────────
         // New Day
@@ -354,20 +440,41 @@ namespace FiresDiscordIntegration.Discord
         }
 
         // ────────────────────────────────────────────────────────────
-        // Random Events (track for hourly summary)
+        // Random Events (post start/stop + count for the hourly summary)
         // ────────────────────────────────────────────────────────────
 
-        [HarmonyPatch(typeof(RandEventSystem), "SetActiveEvent")]
+        // SetRandomEvent is where vanilla starts and ends every random event ("Random event set:<name>" in the log); the
+        // server runs it whatever its clients have installed. 1.0.30 and older only watched SetActiveEvent, which gets an
+        // event only where a local player stands in the area - never on a dedicated server - so no raid was ever posted.
+        [HarmonyPatch(typeof(RandEventSystem), "SetRandomEvent")]
+        [HarmonyPrefix]
+        public static void RandEventSystem_SetRandomEvent_Prefix(RandomEvent ___m_randomEvent, out RandomEvent __state)
+        {
+            __state = ___m_randomEvent;
+        }
+
+        [HarmonyPatch(typeof(RandEventSystem), "SetRandomEvent")]
         [HarmonyPostfix]
-        public static void RandEventSystem_SetActiveEvent_Postfix(RandomEvent ___m_activeEvent)
+        public static void RandEventSystem_SetRandomEvent_Postfix(RandomEvent ___m_randomEvent, RandomEvent __state)
         {
             try
             {
                 if (ZNet.instance == null || !ZNet.instance.IsServer()) return;
-                if (___m_activeEvent != null)
+                RandomEvent before = __state, now = ___m_randomEvent;
+                // Re-setting the running event (same name) is neither an end nor a start.
+                bool same = before != null && now != null && before.m_name == now.m_name;
+                if (before != null && !same)
+                    DiscordIntegrationCore.OnRandomEventStop(before.m_name, before.m_endMessage);
+                if (now != null && !same)
+                {
                     DiscordStatusTracker.RecordEventStarted();
+                    DiscordIntegrationCore.OnRandomEventStart(now.m_name, now.m_startMessage, now.m_pos);
+                }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Discord] random event hook threw {ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         // ────────────────────────────────────────────────────────────

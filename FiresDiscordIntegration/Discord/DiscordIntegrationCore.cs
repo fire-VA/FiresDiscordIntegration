@@ -418,6 +418,12 @@ namespace FiresDiscordIntegration.Discord
                 Debug.Log($"[Discord] OnPlayerChat skipped: {lineType} disabled in cfg (NotifyPlayer{lineType} == false). Flip it on under [Discord.Events] to relay this chat type.");
                 return;
             }
+            if (IgnoredByPrefix(message, out string prefix))
+            {
+                if (_loggedIgnoredPrefixes.Add(prefix))
+                    Debug.Log($"[Discord] chat lines starting with '{prefix}' are not relayed ([Discord.Events] ChatRelayIgnorePrefixes; said once per session).");
+                return;
+            }
 
             // If the message has an @-mention and either the role cache or
             // the member-fetch attempt hasn't landed yet, park the relay on
@@ -483,6 +489,45 @@ namespace FiresDiscordIntegration.Discord
         public static void OnPlayerShout(string playerName, string message) =>
             OnPlayerChat(playerName, message, ChatLineType.Shout);
 
+        /// <summary>
+        /// Whether OnPlayerChat will post this chat type: Discord on, the type switched on and a webhook or bot channel resolved
+        /// (1.0.27: the server only tells a shouter "relayed" when it was).
+        /// </summary>
+        internal static bool WillRelay(ChatLineType lineType, string message) =>
+            IsActive() && IsChatTypeEnabled(lineType) && !IgnoredByPrefix(message, out _)
+            && !string.IsNullOrEmpty(DiscordIntegrationConfig.ResolveWebhookUrl(WebhookCategory.Chat));
+
+        // [Discord.Events] ChatRelayIgnorePrefixes (1.0.29): chat lines starting with one of these words are kept out of Discord, e.g.
+        // commands typed in chat for a bot ("bot drill give Club"). A word prefix must be followed by a non-letter/digit or the end of the line, so
+        // "bot" does not catch "bottle"; a prefix ending in punctuation ("!", "/") matches anything after it.
+        private static string _ignorePrefixesRaw;
+        private static string[] _ignorePrefixes = new string[0];
+        private static readonly HashSet<string> _loggedIgnoredPrefixes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        internal static bool IgnoredByPrefix(string message, out string prefix)
+        {
+            prefix = null;
+            string raw = DiscordIntegrationConfig.ChatRelayIgnorePrefixes?.Value ?? "";
+            if (!string.Equals(raw, _ignorePrefixesRaw, StringComparison.Ordinal))
+            {
+                _ignorePrefixesRaw = raw;
+                _ignorePrefixes = raw.Split(',').Select(p => p.Trim()).Where(p => p.Length > 0).ToArray();
+            }
+            if (string.IsNullOrEmpty(message) || _ignorePrefixes.Length == 0) return false;
+            string text = message.TrimStart();
+            foreach (string candidate in _ignorePrefixes)
+            {
+                if (!text.StartsWith(candidate, StringComparison.OrdinalIgnoreCase)) continue;
+                // 1.0.30: a word prefix ends at anything that is not a letter or digit, so "bot" also covers the bot's own replies
+                // ("bot: drill: gave FishingRod x1", R42); 1.0.29 wanted a space and let those through.
+                bool word = char.IsLetterOrDigit(candidate[candidate.Length - 1]);
+                if (word && text.Length > candidate.Length && char.IsLetterOrDigit(text[candidate.Length])) continue;
+                prefix = candidate;
+                return true;
+            }
+            return false;
+        }
+
         private static bool IsChatTypeEnabled(ChatLineType lineType)
         {
             switch (lineType)
@@ -516,39 +561,88 @@ namespace FiresDiscordIntegration.Discord
         // World Events (Raids)
         // ============================================================
 
+        /// <summary>
+        /// The server finished with one random event post: the event's name, "start" or "stop", true when Discord took it,
+        /// and the log detail (the HTTP code, or why it was skipped). Raised on the server only; tests listen for it.
+        /// </summary>
+        public static event Action<string, string, bool, string> RandomEventReported;
+
+        // Called on the server from RandEventSystem.SetRandomEvent (DiscordIntegrationPatches), whatever the clients run.
         public static void OnRandomEventStart(string eventName, string startMessage, Vector3 position)
         {
-            if (!IsActive()) return;
-            if (DiscordIntegrationConfig.NotifyRandomEvent?.Value != true) return;
+            if (!RandomEventRoute(eventName, "start", out string url)) return;
 
-            var url = DiscordIntegrationConfig.ResolveWebhookUrl(WebhookCategory.General);
             var embed = new DiscordEmbed()
                 .SetTitle("\u2694\uFE0F Event Started")
                 .SetColor(DiscordColors.Purple)
                 .AddField("Event", eventName, true)
-                .AddField("Message", startMessage, true)
+                .AddField("Message", LocalizeOrRaw(startMessage), true)
                 .AddField("Location", $"{position.x:F0}, {position.y:F0}, {position.z:F0}", true)
                 .SetFooter(GetServerName());
 
-            DiscordWebhookService.SendEmbed(url, embed, GetUsername(), GetAvatarUrl());
-            LogVerbose($"Sent EventStart webhook: {eventName}");
+            DiscordWebhookService.SendEmbedWithResult(url, embed, GetUsername(), GetAvatarUrl(),
+                code => ReportRandomEvent(eventName, "start", code));
         }
 
         public static void OnRandomEventStop(string eventName, string endMessage)
         {
-            if (!IsActive()) return;
-            if (DiscordIntegrationConfig.NotifyRandomEvent?.Value != true) return;
+            if (!RandomEventRoute(eventName, "stop", out string url)) return;
 
-            var url = DiscordIntegrationConfig.ResolveWebhookUrl(WebhookCategory.General);
             var embed = new DiscordEmbed()
                 .SetTitle("\U0001F6D1 Event Ended")
-                .SetDescription(endMessage)
+                .SetDescription(LocalizeOrRaw(endMessage))
                 .SetColor(DiscordColors.Yellow)
                 .AddField("Event", eventName, true)
                 .SetFooter(GetServerName());
 
-            DiscordWebhookService.SendEmbed(url, embed, GetUsername(), GetAvatarUrl());
-            LogVerbose($"Sent EventStop webhook: {eventName}");
+            DiscordWebhookService.SendEmbedWithResult(url, embed, GetUsername(), GetAvatarUrl(),
+                code => ReportRandomEvent(eventName, "stop", code));
+        }
+
+        // Where a random event posts, or false with one Info line saying why it doesn't (raids are rare, so a line each is fine).
+        private static bool RandomEventRoute(string eventName, string phase, out string url)
+        {
+            url = null;
+            string skipped = null;
+            if (DiscordIntegrationConfig.Enabled == null || !DiscordIntegrationConfig.Enabled.Value)
+                skipped = "[Discord] Enabled = false";
+            else if (DiscordIntegrationConfig.NotifyRandomEvent?.Value != true)
+                skipped = "[Discord.Events] NotifyRandomEvent = false";
+            else
+            {
+                url = DiscordIntegrationConfig.ResolveWebhookUrl(WebhookCategory.Events);
+                if (string.IsNullOrEmpty(url))
+                    skipped = "no webhook ([Discord.Webhooks] EventsWebhookUrl and GeneralWebhookUrl are empty)";
+                else if (!DiscordWebhookService.IsTarget(url))
+                    skipped = "[Discord.Webhooks] EventsWebhookUrl / GeneralWebhookUrl is not a Discord webhook URL";
+            }
+            if (skipped == null) return true;
+
+            FiresLogger.LogInfo($"[Discord] event '{eventName}' {phase} skipped: {skipped}");
+            RaiseRandomEventReported(eventName, phase, false, "skipped: " + skipped);
+            return false;
+        }
+
+        private static void ReportRandomEvent(string eventName, string phase, long code)
+        {
+            bool posted = code >= 200 && code < 300;
+            if (posted) FiresLogger.LogInfo($"[Discord] event '{eventName}' {phase} posted (HTTP {code})");
+            else FiresLogger.LogWarning($"[Discord] event '{eventName}' {phase} failed: HTTP {code}");
+            RaiseRandomEventReported(eventName, phase, posted, "HTTP " + code);
+        }
+
+        private static void RaiseRandomEventReported(string eventName, string phase, bool posted, string detail)
+        {
+            try { RandomEventReported?.Invoke(eventName, phase, posted, detail); }
+            catch (Exception ex) { FiresLogger.LogWarning($"[Discord] a RandomEventReported listener threw {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        // Event messages are "$..." tokens; the server's English text when it has one, the token otherwise.
+        private static string LocalizeOrRaw(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            try { return Localization.instance != null ? Localization.instance.Localize(text) : text; }
+            catch { return text; }
         }
 
         public static void OnNewDay(int dayNumber)

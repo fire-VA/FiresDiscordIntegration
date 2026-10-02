@@ -21,6 +21,7 @@ namespace FiresDiscordIntegration.Discord
         public static ConfigEntry<string> AntiCheatWebhookUrl;
         public static ConfigEntry<string> ChatWebhookUrl;
         public static ConfigEntry<string> ClientLogWebhookUrl;
+        public static ConfigEntry<string> EventsWebhookUrl;
 
         // ------ Event Toggles ------
         public static ConfigEntry<bool> NotifyServerStart;
@@ -32,6 +33,7 @@ namespace FiresDiscordIntegration.Discord
         public static ConfigEntry<bool> NotifyPlayerShout;
         public static ConfigEntry<bool> NotifyPlayerSay;
         public static ConfigEntry<bool> NotifyPlayerWhisper;
+        public static ConfigEntry<string> ChatRelayIgnorePrefixes;
         public static ConfigEntry<bool> NotifyRandomEvent;
         public static ConfigEntry<bool> NotifyNewDay;
         public static ConfigEntry<bool> NotifyAntiCheatKick;
@@ -163,6 +165,9 @@ namespace FiresDiscordIntegration.Discord
                 "errors+warnings report). Fires on every successful client login so admins can audit " +
                 "what mods the client is running and whether their session is clean. " +
                 "Falls back to GeneralWebhookUrl if empty.");
+            EventsWebhookUrl = config.Bind("Discord.Webhooks", "EventsWebhookUrl", "",
+                "Discord webhook URL for random events (raids) starting and ending. " +
+                "Falls back to GeneralWebhookUrl if empty.");
             ScreenshotsWebhookUrl = config.Bind("Discord.Webhooks", "ScreenshotsWebhookUrl", "",
                 "Discord webhook URL for ALL screenshot posts - deaths, achievements, skill level-ups, and " +
                 "EWP-triggered screenshots all go here. Falls back to GeneralWebhookUrl if empty.");
@@ -232,8 +237,11 @@ namespace FiresDiscordIntegration.Discord
             NotifyPlayerWhisper = config.Bind("Discord.Events", "NotifyPlayerWhisper", true,
                 "Send webhook when a player whispers (/w, private to nearest player). " +
                 "Turn off if your server treats whispers as private and shouldn't surface them in Discord.");
+            ChatRelayIgnorePrefixes = config.Bind("Discord.Events", "ChatRelayIgnorePrefixes", "",
+                "Chat lines (shout, say, whisper) starting with any of these comma-separated words are not posted to Discord, " +
+                "e.g. commands typed in chat for a bot. Not case-sensitive. Empty relays everything.");
             NotifyRandomEvent = config.Bind("Discord.Events", "NotifyRandomEvent", true,
-                "Send webhook when a random event (raid) starts/stops.");
+                "Send webhook when a random event (raid) starts/stops. Posts to EventsWebhookUrl (or GeneralWebhookUrl).");
             NotifyNewDay = config.Bind("Discord.Events", "NotifyNewDay", false,
                 "Send webhook on each new in-game day. Disabled by default (frequent).");
             NotifyAntiCheatKick = config.Bind("Discord.Events", "NotifyAntiCheatKick", true,
@@ -447,6 +455,9 @@ namespace FiresDiscordIntegration.Discord
                 case WebhookCategory.ClientLog:
                     url = ClientLogWebhookUrl?.Value;
                     break;
+                case WebhookCategory.Events:
+                    url = EventsWebhookUrl?.Value;
+                    break;
                 case WebhookCategory.Screenshots:
                     url = ScreenshotsWebhookUrl?.Value;
                     break;
@@ -515,6 +526,7 @@ namespace FiresDiscordIntegration.Discord
         Chat,
         ClientLog,
         Screenshots,
-        TestShots
+        TestShots,
+        Events
     }
 }

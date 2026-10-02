@@ -292,8 +292,25 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
             FiresLogger.LogVerbose("[ServerHeartbeat] Control reactions seeded successfully");
         }
 
+        // A heartbeat edit that fails on Discord's side (no response, 429, or 5xx - "503 upstream connect error ... connection
+        // termination" is Discord's edge dropping the request) is retried inside the tick with backoff, honouring Retry-After.
+        // The next tick edits again anyway, so one failed tick is not news: a Warning only after HeartbeatWarnAfterFailedTicks
+        // failed ticks in a row, then at most once an hour, and one Info line when an edit works again.
+        private const int   HeartbeatEditAttempts         = 3;
+        private const float HeartbeatRetryBaseSeconds     = 2f;
+        private const float HeartbeatRetryMaxSeconds      = 20f;
+        private const int   HeartbeatWarnAfterFailedTicks = 3;
+        private const float HeartbeatWarnRepeatSeconds    = 3600f;
+        private static int    _heartbeatFailedTicks;
+        private static string _heartbeatLastError;
+        private static float  _heartbeatLastWarnAt = float.NegativeInfinity;
+        private static float  _heartbeatHoldUntil;
+
         private static IEnumerator HeartbeatLoop()
         {
+            _heartbeatFailedTicks = 0;
+            _heartbeatLastError = null;
+            _heartbeatHoldUntil = 0f;
             while (!_cleanShutdown)
             {
                 yield return new WaitForSecondsRealtime(HeartbeatIntervalSeconds);
@@ -302,36 +319,97 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
                 try { WriteSentinel("running"); } catch { }
 
                 if (string.IsNullOrEmpty(_statusMessageId)) continue;
+                // A Retry-After longer than a tick: skip the edits it covers.
+                if (Time.realtimeSinceStartup < _heartbeatHoldUntil) continue;
 
                 var embed = BuildOnlineEmbed();
                 string json = BuildEmbedPayload(embed);
+                byte[] body = Encoding.UTF8.GetBytes(json);
 
                 string url = BuildEditUrl(_statusMessageId, out bool needsBotAuth);
 
-                using (var req = new UnityWebRequest(url, "PATCH"))
+                bool ok = false;
+                long code = 0;
+                string error = null;
+                for (int attempt = 0; attempt < HeartbeatEditAttempts; attempt++)
                 {
-                    byte[] body = Encoding.UTF8.GetBytes(json);
-                    req.uploadHandler = new UploadHandlerRaw(body);
-                    req.downloadHandler = new DownloadHandlerBuffer();
-
-                    // Only set Authorization header for the bot-API path; the
-                    // webhook path is auth'd by its embedded token.
-                    if (needsBotAuth)
-                        req.SetRequestHeader("Authorization", $"Bot {_botToken}");
-
-                    req.SetRequestHeader("Content-Type", "application/json");
-                    req.timeout = 10;
-                    yield return req.SendWebRequest();
-
-#if UNITY_2020_1_OR_NEWER
-                    if (req.result != UnityWebRequest.Result.Success)
-#else
-                    if ((req.result == UnityWebRequest.Result.ConnectionError) || (req.result == UnityWebRequest.Result.ProtocolError))
-#endif
+                    float retryAfter = 0f;
+                    using (var req = new UnityWebRequest(url, "PATCH"))
                     {
-                        Debug.LogWarning($"[ServerHeartbeat] Heartbeat edit failed ({req.responseCode}): {req.downloadHandler?.text ?? req.error}");
+                        req.uploadHandler = new UploadHandlerRaw(body);
+                        req.downloadHandler = new DownloadHandlerBuffer();
+
+                        // Only set Authorization header for the bot-API path; the
+                        // webhook path is auth'd by its embedded token.
+                        if (needsBotAuth)
+                            req.SetRequestHeader("Authorization", $"Bot {_botToken}");
+
+                        req.SetRequestHeader("Content-Type", "application/json");
+                        req.timeout = 10;
+                        yield return req.SendWebRequest();
+
+                        code = req.responseCode;
+                        ok = EditSucceeded(req);
+                        if (!ok)
+                        {
+                            string text;
+                            try { text = req.downloadHandler?.text; }
+                            catch { text = null; }
+                            error = TrimForLog(string.IsNullOrEmpty(text) ? req.error : text);
+                            retryAfter = ParseRetryAfter(req, text);
+                        }
                     }
+                    if (ok || _cleanShutdown) break;
+
+                    bool transient = code == 0 || code == HttpStatusRateLimited || code >= 500;
+                    if (!transient || attempt == HeartbeatEditAttempts - 1) break;
+                    if (retryAfter > HeartbeatRetryMaxSeconds)
+                    {
+                        _heartbeatHoldUntil = Time.realtimeSinceStartup + retryAfter;
+                        break;
+                    }
+                    float wait = retryAfter > 0f
+                        ? retryAfter + RateLimitWaitBufferSeconds
+                        : HeartbeatRetryBaseSeconds * (1 << attempt);
+                    FiresLogger.LogVerbose($"[ServerHeartbeat] Heartbeat edit failed ({code}), retry {attempt + 1} in {wait:F1}s");
+                    yield return new WaitForSecondsRealtime(wait);
                 }
+                NoteHeartbeatEdit(ok, code, error);
+            }
+        }
+
+        private static bool EditSucceeded(UnityWebRequest req)
+        {
+#if UNITY_2020_1_OR_NEWER
+            return req.result == UnityWebRequest.Result.Success;
+#else
+            return req.result != UnityWebRequest.Result.ConnectionError && req.result != UnityWebRequest.Result.ProtocolError;
+#endif
+        }
+
+        private static void NoteHeartbeatEdit(bool ok, long code, string error)
+        {
+            if (ok)
+            {
+                if (_heartbeatFailedTicks > 0)
+                    FiresLogger.LogInfo($"[ServerHeartbeat] Heartbeat edit recovered after {_heartbeatFailedTicks} failed tick(s) (last {_heartbeatLastError})");
+                _heartbeatFailedTicks = 0;
+                _heartbeatLastError = null;
+                return;
+            }
+
+            _heartbeatFailedTicks++;
+            _heartbeatLastError = $"{code}: {error}";
+            float now = Time.realtimeSinceStartup;
+            if (_heartbeatFailedTicks >= HeartbeatWarnAfterFailedTicks && now - _heartbeatLastWarnAt >= HeartbeatWarnRepeatSeconds)
+            {
+                _heartbeatLastWarnAt = now;
+                Debug.LogWarning($"[ServerHeartbeat] Heartbeat edit failed {_heartbeatFailedTicks} ticks in a row (last {_heartbeatLastError}); " +
+                                 "still retrying every tick, next warning in an hour at the earliest");
+            }
+            else
+            {
+                FiresLogger.LogVerbose($"[ServerHeartbeat] Heartbeat edit failed ({_heartbeatLastError}), {_heartbeatFailedTicks} tick(s) in a row");
             }
         }
 

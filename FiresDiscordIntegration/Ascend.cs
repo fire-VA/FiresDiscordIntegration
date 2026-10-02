@@ -43,7 +43,7 @@ namespace FiresDiscordIntegration
     {
         public const string PluginGUID    = "com.Fire.FiresDiscordIntegration";
         public const string PluginName    = "FiresDiscordIntegration";
-        public const string PluginVersion = "1.0.25";
+        public const string PluginVersion = "1.0.31";
 
         public static FiresDiscordIntegrationPlugin Instance;
         public static readonly Harmony Harmony = new Harmony(PluginGUID);
@@ -174,10 +174,41 @@ namespace FiresDiscordIntegration
                     $"bot listener: {(DiscordBotListener.Running ? "on" : "off")}",
                     $"crash detector: {(ServerHeartbeat.CrashNotifierArmed ? "on" : "off")}",
                     heartbeat ? $"heartbeat: {ServerHeartbeat.IntervalSeconds:0}s" : "heartbeat: off",
-                    ClientLogRelayIntegration.RelayActive ? "relay initialised" : "relay: off",
+                    // 1.0.26: "relay: off" was read as the CHAT relay being off; it is the client log relay.
+                    ClientLogRelayIntegration.RelayActive ? "client log relay: on" : "client log relay: off",
+                    ChatRelaySummary(out string chatDetail),
                 });
+                // The box cuts long lines; the full chat relay state and its shout hooks go in one plain line.
+                Debug.Log("[Discord] " + chatDetail);
             }
             catch (Exception ex) { FiresLogger.LogWarning($"discord summary failed: {ex.Message}"); }
+        }
+
+        // Where in-game chat goes: the webhook it resolves to (Chat, else General), the chat types switched on and whether the
+        // three shout hooks (1.0.28) are patched.
+        private static string ChatRelaySummary(out string detail)
+        {
+            string hooks = $"shout hooks: {Hooked(typeof(Chat), nameof(Chat.SendText), "client relay")}, "
+                + $"{Hooked(typeof(ZRoutedRpc), "RouteRPC", "server route")}, {Hooked(typeof(ZRoutedRpc), "HandleRoutedRPC", "server handle")}";
+            if (!DiscordIntegrationCore.IsActive()) { detail = "chat relay: off (Discord disabled); " + hooks; return "chat relay: off"; }
+            string webhook = !string.IsNullOrEmpty(DiscordIntegrationConfig.ChatWebhookUrl?.Value) ? "ChatWebhookUrl"
+                : !string.IsNullOrEmpty(DiscordIntegrationConfig.GeneralWebhookUrl?.Value) ? "GeneralWebhookUrl" : null;
+            if (webhook == null) { detail = "chat relay: OFF - set ChatWebhookUrl or GeneralWebhookUrl; " + hooks; return "chat relay: OFF (no webhook)"; }
+            var kinds = new System.Collections.Generic.List<string>();
+            if (DiscordIntegrationConfig.NotifyPlayerShout?.Value == true) kinds.Add("shout");
+            if (DiscordIntegrationConfig.NotifyPlayerSay?.Value == true) kinds.Add("say");
+            if (DiscordIntegrationConfig.NotifyPlayerWhisper?.Value == true) kinds.Add("whisper");
+            detail = $"chat relay: on via {webhook} ({(kinds.Count > 0 ? string.Join(", ", kinds) : "no chat types on")}); {hooks}";
+            return "chat relay: on";
+        }
+
+        private static string Hooked(Type type, string method, string label)
+        {
+            var target = AccessTools.Method(type, method);
+            var info = target != null ? HarmonyLib.Harmony.GetPatchInfo(target) : null;
+            bool ours = info != null && (System.Linq.Enumerable.Any(info.Prefixes, p => p.owner == PluginGUID)
+                                         || System.Linq.Enumerable.Any(info.Postfixes, p => p.owner == PluginGUID));
+            return ours ? label : "NO " + label;
         }
 
         private void OnDestroy()

@@ -15,13 +15,19 @@ namespace FiresDiscordIntegration.ChatRelay
     /// never sees Say/Whisper on a dedi.  This RPC closes that gap: the sender's
     /// machine pushes a (name, text, type) packet to the server every time
     /// Chat.SendText fires for a Say/Whisper, and the server replays it through
-    /// the regular OnPlayerChat pipeline.  Shouts still go through the existing
-    /// ZRoutedRpc "ChatMessage" path that the server already processes; relaying
-    /// them through this RPC too would just double-post.
+    /// the regular OnPlayerChat pipeline.  Shouts are read on the server's routed
+    /// RPC receive path instead (DiscordIntegrationPatches, 1.0.27: vanilla sends a
+    /// 1.0 shout to the server as "ChatMessage"), so they never come through here.
     /// </summary>
     internal static class ChatRelayRpc
     {
         internal const string RpcName = "FiresDiscord_ChatRelay";
+
+        // 1.0.27: the server tells a shouter's client that its shout was relayed to Discord. A client without the handler ignores it.
+        internal const string RelayedRpcName = "FiresDiscord_ChatRelayed";
+
+        /// <summary>Raised on the shouter's client when the server relayed its shout to Discord: the shout's text.</summary>
+        public static event Action<string> Relayed;
 
         private static bool _registered;
 
@@ -30,7 +36,21 @@ namespace FiresDiscordIntegration.ChatRelay
             if (_registered) return;
             if (ZRoutedRpc.instance == null) return;
             ZRoutedRpc.instance.Register<ZPackage>(RpcName, OnReceive);
+            ZRoutedRpc.instance.Register<string>(RelayedRpcName, OnRelayed);
             _registered = true;
+        }
+
+        internal static void TellRelayed(long peer, string text)
+        {
+            if (ZRoutedRpc.instance == null || peer == 0L || string.IsNullOrEmpty(text)) return;
+            ZRoutedRpc.instance.InvokeRoutedRPC(peer, RelayedRpcName, text);
+        }
+
+        private static void OnRelayed(long sender, string text)
+        {
+            Debug.Log($"[Discord] the server relayed this client's shout to Discord: '{text}'");
+            try { Relayed?.Invoke(text); }
+            catch (Exception ex) { Debug.LogWarning($"[Discord] a Relayed listener threw: {ex.Message}"); }
         }
 
         public static void ClearRegistration() { _registered = false; }
@@ -64,11 +84,17 @@ namespace FiresDiscordIntegration.ChatRelay
             DiscordIntegrationCore.ChatLineType lineType;
             if      (senderType == Talker.Type.Normal)  lineType = DiscordIntegrationCore.ChatLineType.Say;
             else if (senderType == Talker.Type.Whisper) lineType = DiscordIntegrationCore.ChatLineType.Whisper;
+            else if (senderType == Talker.Type.Shout)
+            {
+                // 1.0.28: Valheim 1.0 sends a shout to each recipient, and the shouter's own copy never leaves its machine, so a
+                // shout with nobody else online never reaches the server. The shouter's client relays it here instead;
+                // RelayShout de-duplicates it against the copies the server routes on to other players.
+                DiscordIntegrationPatches.RelayShout(playerName, sender, text, "client relay");
+                return;
+            }
             else
             {
-                // Shouts already arrive via the regular OnNewChatMessage path on
-                // the server; ignore so we don't duplicate the post.  Ping
-                // (type 3) is map-marker, never relayed.
+                // Ping (type 3) is a map marker, never relayed.
                 return;
             }
 
@@ -348,11 +374,11 @@ namespace FiresDiscordIntegration.ChatRelay
         // chat types over a tiny custom routed RPC so the server-side relay
         // can still post them.
         //
-        // Shouts are intentionally skipped: vanilla already routes them via
-        // ZRoutedRpc.InvokeRoutedRPC("ChatMessage", ...) which the dedicated
-        // server processes locally, so the existing OnNewChatMessage prefix
-        // already covers them.  Relaying shouts through this RPC too would
-        // double-post.
+        // Shouts go through it too (1.0.28): Valheim 1.0 sends a shout to each
+        // recipient (Chat.CheckPermissionsAndSendChatMessageRPCsAsync), the
+        // shouter's own copy never leaves its machine, so with nobody else
+        // online the server never sees one.  The server de-duplicates this
+        // against the copies it routes on to other players.
         //
         // Listen-server hosts (host = player = server) DO see Say/Whisper via
         // Talker.RPC_Say firing locally on the host's player ZDO, so the
@@ -364,7 +390,7 @@ namespace FiresDiscordIntegration.ChatRelay
         {
             try
             {
-                if (type != Talker.Type.Normal && type != Talker.Type.Whisper) return;
+                if (type != Talker.Type.Normal && type != Talker.Type.Whisper && type != Talker.Type.Shout) return;
                 if (string.IsNullOrEmpty(text)) return;
 
                 var localPlayer = Player.m_localPlayer;

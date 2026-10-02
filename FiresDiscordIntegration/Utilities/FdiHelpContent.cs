@@ -40,7 +40,7 @@ namespace FiresDiscordIntegration.Utilities
             w.SubHeader("Webhooks");
             w.Paragraph("Everything posts through Discord webhooks configured under [Discord.Webhooks]: " +
                 "GeneralWebhookUrl, plus optional dedicated ChatWebhookUrl, ScreenshotsWebhookUrl, " +
-                "AntiCheatWebhookUrl, and ClientLogWebhookUrl (each falls back to General when empty). " +
+                "AntiCheatWebhookUrl, ClientLogWebhookUrl and EventsWebhookUrl (each falls back to General when empty). " +
                 "These are SECRETS \u2014 they are deliberately never synced to clients; keep them out of " +
                 "modpack exports.");
             w.Bullet("[Discord] Enabled \u2014 master switch (server/host only)");

@@ -41,7 +41,7 @@ namespace FiresDiscordIntegration.Discord
         }
 
         // A webhook URL, or a "discord-bot-channel:<id>" target (test shots posted AS THE BOT, Fire 09-29 22:5x).
-        private static bool IsTarget(string url) => IsValidWebhookUrl(url) || BotChannelTarget.TryParse(url, out _);
+        internal static bool IsTarget(string url) => IsValidWebhookUrl(url) || BotChannelTarget.TryParse(url, out _);
 
         // Where a target posts, and the bot's Authorization header when it is a bot channel (null for a webhook). A bot
         // can't override its name or avatar, so those payload fields are dropped for it.
@@ -213,6 +213,27 @@ namespace FiresDiscordIntegration.Discord
         }
 
         /// <summary>
+        /// Send a rich embed; <paramref name="onResult"/> gets the HTTP status code when the post ends (0 = no response,
+        /// -1 = never sent: no target, no embed, or the payload didn't serialise).
+        /// </summary>
+        public static void SendEmbedWithResult(string webhookUrl, DiscordEmbed embed,
+            string username, string avatarUrl, Action<long> onResult)
+        {
+            if (!IsTarget(webhookUrl) || embed == null) { onResult?.Invoke(-1); return; }
+
+            var payload = new Dictionary<string, object>
+            {
+                { "embeds", new List<Dictionary<string, object>> { embed.ToDictionary() } }
+            };
+            if (!string.IsNullOrEmpty(username))
+                payload["username"] = username;
+            if (!string.IsNullOrEmpty(avatarUrl))
+                payload["avatar_url"] = avatarUrl;
+
+            EnqueuePost(webhookUrl, payload, null, onResult);
+        }
+
+        /// <summary>
         /// Send a rich embed with one or more file attachments via multipart/form-data.
         /// Discord webhooks support file uploads when using multipart encoding.
         /// </summary>
@@ -252,16 +273,17 @@ namespace FiresDiscordIntegration.Discord
         }
 
         private static void EnqueuePost(string webhookUrl, Dictionary<string, object> payload,
-            Action onComplete = null)
+            Action onComplete = null, Action<long> onResult = null)
         {
             EnsureHost();
-            if (_host == null) { onComplete?.Invoke(); return; }
-            _host.StartCoroutine(PostCoroutine(webhookUrl, payload, onComplete));
+            if (_host == null) { onResult?.Invoke(-1); onComplete?.Invoke(); return; }
+            _host.StartCoroutine(PostCoroutine(webhookUrl, payload, onComplete, onResult));
         }
 
         private static IEnumerator PostCoroutine(string webhookUrl, Dictionary<string, object> payload,
-            Action onComplete = null)
+            Action onComplete = null, Action<long> onResult = null)
         {
+            long code = 0;
             // Respect rate limits
             if (Time.unscaledTime < _rateLimitUntil)
             {
@@ -279,6 +301,7 @@ namespace FiresDiscordIntegration.Discord
             catch (Exception ex)
             {
                 Debug.LogWarning($"[Discord] JSON serialize error: {ex.Message}");
+                onResult?.Invoke(-1);
                 yield break;
             }
 
@@ -294,7 +317,7 @@ namespace FiresDiscordIntegration.Discord
 
                 yield return request.SendWebRequest();
 
-                long code = request.responseCode;
+                code = request.responseCode;
 
                 if (code >= 200 && code < 300)
                 {
@@ -336,6 +359,8 @@ namespace FiresDiscordIntegration.Discord
                 }
             }
 
+            try { onResult?.Invoke(code); }
+            catch (Exception ex) { Debug.LogWarning($"[Discord] webhook result handler threw {ex.GetType().Name}: {ex.Message}"); }
             onComplete?.Invoke();
         }
 
