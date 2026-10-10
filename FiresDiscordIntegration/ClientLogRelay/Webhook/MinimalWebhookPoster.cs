@@ -74,6 +74,30 @@ namespace FiresDiscordIntegration.ClientLogRelay.Webhook
                 : this(fileName, Encoding.UTF8.GetBytes(text ?? string.Empty), contentType) { }
         }
 
+        // Fire 10-05 (a clean log): "Invalid webhook URL; skipping post" came on every post when no URL was set at all.
+        // No URL means relay posts are off: one Debug line, once. A URL that is set but malformed is a config mistake:
+        // one Warning per distinct value, naming only its length and start (the rest of a webhook URL is its token).
+        private static bool s_noUrlNoted;
+        private static readonly HashSet<string> s_badUrlsWarned = new HashSet<string>(StringComparer.Ordinal);
+        private const int UrlHintLength = 24;
+
+        private static void NoteSkippedPost(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                if (s_noUrlNoted)
+                    return;
+                s_noUrlNoted = true;
+                FiresLogger.LogDebug("[ClientLogRelay] No webhook URL set: relay posts are off.");
+                return;
+            }
+            if (!s_badUrlsWarned.Add(url))
+                return;
+            string hint = url.Length > UrlHintLength ? url.Substring(0, UrlHintLength) + "..." : url;
+            FiresLogger.LogWarning($"[ClientLogRelay] Webhook URL is not a Discord webhook (\"{hint}\", {url.Length} characters); "
+                + "posts to it are skipped. Expected https://discord.com/api/webhooks/... or a discord-bot-channel:<id> target.");
+        }
+
         public static bool IsValidWebhookUrl(string url)
         {
             if (string.IsNullOrEmpty(url) || !url.StartsWith("https://", StringComparison.Ordinal))
@@ -114,7 +138,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Webhook
             }
             else if (!IsValidWebhookUrl(webhookUrl))
             {
-                Debug.LogWarning("[ClientLogRelay] Invalid webhook URL; skipping post");
+                NoteSkippedPost(webhookUrl);
                 onPosted?.Invoke(null, null);
                 return;
             }

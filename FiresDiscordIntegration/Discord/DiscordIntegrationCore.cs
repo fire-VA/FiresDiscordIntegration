@@ -410,12 +410,12 @@ namespace FiresDiscordIntegration.Discord
         {
             if (!IsActive())
             {
-                Debug.Log($"[Discord] OnPlayerChat skipped: IsActive() == false (Discord.Enabled is off in cfg). lineType={lineType}");
+                ChatSkipOnce("inactive", $"[Discord] OnPlayerChat skipped: IsActive() == false (Discord.Enabled is off in cfg). lineType={lineType}");
                 return;
             }
             if (!IsChatTypeEnabled(lineType))
             {
-                Debug.Log($"[Discord] OnPlayerChat skipped: {lineType} disabled in cfg (NotifyPlayer{lineType} == false). Flip it on under [Discord.Events] to relay this chat type.");
+                ChatSkipOnce("off:" + lineType, $"[Discord] OnPlayerChat skipped: {lineType} disabled in cfg (NotifyPlayer{lineType} == false). Flip it on under [Discord.Events] to relay this chat type.");
                 return;
             }
             if (IgnoredByPrefix(message, out string prefix))
@@ -481,7 +481,16 @@ namespace FiresDiscordIntegration.Discord
                 GetUsername(), GetAvatarUrl(),
                 forceAllowedRoleIds: resolved.ResolvedRoleIds);
 
-            Debug.Log($"[Discord] Relayed {lineType} from '{playerName}' to Discord ({resolved.ResolvedRoleIds.Count} role mention(s) resolved).");
+            FiresLogger.LogDebug($"[Discord] Relayed {lineType} from '{playerName}' to Discord ({resolved.ResolvedRoleIds.Count} role mention(s) resolved).");
+        }
+
+        // A config skip is news once per reason (a plain log shows why chat never reaches Discord); every later message is Debug.
+        private static readonly HashSet<string> _loggedChatSkips = new HashSet<string>();
+
+        private static void ChatSkipOnce(string key, string line)
+        {
+            if (_loggedChatSkips.Add(key)) Debug.Log(line + " (said once per session; later skips at Debug)");
+            else FiresLogger.LogDebug(line);
         }
 
         // Backwards-compatible shim - kept so any external code calling the old
@@ -626,7 +635,7 @@ namespace FiresDiscordIntegration.Discord
         private static void ReportRandomEvent(string eventName, string phase, long code)
         {
             bool posted = code >= 200 && code < 300;
-            if (posted) FiresLogger.LogInfo($"[Discord] event '{eventName}' {phase} posted (HTTP {code})");
+            if (posted) FiresLogger.LogDebug($"[Discord] event '{eventName}' {phase} posted (HTTP {code})");
             else FiresLogger.LogWarning($"[Discord] event '{eventName}' {phase} failed: HTTP {code}");
             RaiseRandomEventReported(eventName, phase, posted, "HTTP " + code);
         }

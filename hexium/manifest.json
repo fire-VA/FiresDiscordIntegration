@@ -1,10 +1,10 @@
 {
     "name": "FiresDiscordIntegration",
-    "version_number": "1.0.31",
+    "version_number": "1.0.34",
     "website_url": "https://github.com/fire-VA/FiresDiscordIntegration",
     "description": "Two-way Discord<->Valheim chat, live server-status panel with restart/stop reactions, automatic per-client login snapshots, and an auto-restart wrapper bat.",
     "dependencies": [
         "denikson-BepInExPack_Valheim-5.4.2350",
-        "incompletionists-FiresUnifiedCore-0.2.219"
+        "incompletionists-FiresUnifiedCore-0.2.387"
     ]
 }

@@ -43,7 +43,7 @@ namespace FiresDiscordIntegration
     {
         public const string PluginGUID    = "com.Fire.FiresDiscordIntegration";
         public const string PluginName    = "FiresDiscordIntegration";
-        public const string PluginVersion = "1.0.31";
+        public const string PluginVersion = "1.0.34";
 
         public static FiresDiscordIntegrationPlugin Instance;
         public static readonly Harmony Harmony = new Harmony(PluginGUID);

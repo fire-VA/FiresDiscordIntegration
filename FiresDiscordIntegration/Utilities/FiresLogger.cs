@@ -16,6 +16,9 @@ namespace FiresDiscordIntegration
 
         public static void LogVerbose(string message) => Log.Verbose(message);
 
+        // Per-action evidence (Fire 10-01: no noisy Info lines): prints only at Core's [Logging] Log Level = Debug.
+        public static void LogDebug(string message) => Log.Debug(message);
+
         public static void LogWarning(string message) => Log.Warning(message);
 
         public static void LogError(string message) => Log.Error(message);

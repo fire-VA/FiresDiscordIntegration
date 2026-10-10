@@ -13,7 +13,7 @@ Two-way Discord ↔ Valheim chat, a live server-status panel with restart/stop r
 | Feature | What you get |
 |---------|--------------|
 | **Server Manager panel** | A single live-updating embed in a Discord channel showing player count, names, uptime, last heartbeat. Click the 🔄 reaction to restart the server, ⛔ to stop it (waits for the next 🔄 click before coming back). |
-| **Two-way chat relay** | Discord messages appear in-game prefixed with `[Discord] author:` in the author's Discord role color. In-game shouts get posted back to Discord through a webhook with the player's name + avatar. |
+| **Two-way chat relay** | Discord messages appear in-game prefixed with `[Discord] author:` in the author's Discord role color. In-game shout, say and whisper lines get posted back to Discord through a webhook with the player's name + avatar. |
 | **Inline GIFs and images** | Tenor / Giphy / Klipy share URLs and direct attachment uploads render as actual images (and animated GIFs) inside the in-game chat overlay. |
 | **@mention resolution** | A player typing `@admin` in game chat sends a real `@admin` Discord ping by resolving the role name via the bot. `@everyone` and `@here` work as-is. |
 | **Login snapshots** | Every player that logs in gets a Discord embed posted: their mod list, error count, warning count, the *actual* mods that produced those errors (no fuzzy-matching false positives), and a client-vs-server mod diff. Admins react to the embed to request the full log / errors-only report / mod list .txt / a session log captured at disconnect. Off by default (`NotifyClientLoginArtifacts`); while it is off, clients send no logs at all. |
@@ -44,7 +44,8 @@ The DLL auto-detects which side it's running on at `ZNet.Awake` (it calls `IsSer
 | Feature | Server | Client |
 |---------|:------:|:------:|
 | Live server-status panel + restart/stop reactions | ✓ | — |
-| In-game shouts → Discord (via webhook) | ✓ | — |
+| In-game shouts → Discord (via webhook) | ✓ | ✓* |
+| In-game say / whisper → Discord (via webhook) | ✓ | ✓ |
 | Discord → in-game chat (plain text shows up) | ✓ | — |
 | Per-user **Discord role color** on the relayed chat line | ✓ | ✓ |
 | **GIF / image rendering** inside the in-game chat overlay | ✓ | ✓ |
@@ -56,7 +57,9 @@ The DLL auto-detects which side it's running on at `ZNet.Awake` (it calls `IsSer
 
 **Without the DLL on the client, the server sees no log data for that player and skips the snapshot entirely (no false-positive embed, no crash).
 
-A player joining a server that has the mod installed but who doesn't have the mod themselves still works — they just don't contribute a snapshot. The rest of the server-side features (status panel, crash notifications, in-game-shout → Discord) work for everyone regardless.
+\*Valheim 1.0 sends a shout from player to player, so a shout reaches the server only when someone else is online to hear it. With the mod on the shouting player's client, their shout always reaches Discord, even when they're alone on the server. Say and whisper always need the mod on the speaker's client.
+
+A player joining a server that has the mod installed but who doesn't have the mod themselves still works — they just don't contribute a snapshot. The rest of the server-side features (status panel, crash notifications) work for everyone regardless.
 
 ---
 
@@ -129,6 +132,7 @@ In each channel that should receive event posts: **Edit Channel → Integrations
 - `ChatWebhookUrl` — relayed in-game chat (so messages show with the player's name + avatar instead of the bot's)
 - `AntiCheatWebhookUrl` — kick / violation notifications
 - `ClientLogWebhookUrl` — login snapshots + on-demand log artifacts
+- `EventsWebhookUrl` — random events (raids) starting and ending, posted by the server (empty falls back to `GeneralWebhookUrl`)
 
 Webhooks and the bot can post into the same channel — Discord doesn't care.
 
@@ -209,6 +213,7 @@ The `BepInEx/config/com.Fire.FiresDiscordIntegration.cfg` file has every setting
 | `Discord.BotListener` | `DiscordGuildId` | Required for @mention resolution + per-user role colors. |
 | `Discord.Webhooks` | `GeneralWebhookUrl` / `ChatWebhookUrl` / `AntiCheatWebhookUrl` / `ClientLogWebhookUrl` | Outgoing webhooks. Empty = that channel disabled. |
 | `Discord.Webhooks` | `ScreenshotsWebhookUrl` | Death / achievement / skill / EWP screenshots. Empty falls back to `GeneralWebhookUrl`. |
+| `Discord.Webhooks` | `EventsWebhookUrl` | Random events (raids) starting and ending. Empty falls back to `GeneralWebhookUrl`. Toggle: `Discord.Events` / `NotifyRandomEvent`. |
 | `Discord.BotListener` | `EnableBotListener` | Master switch for everything that needs the bot token. |
 | *(no key)* | `FiresDiscordIntegration_BotToken.cfg` at server root | Bot token lives in its own file outside `BepInEx/config/` — see step 3 above. |
 | `Discord.BotListener` | `BotTokenPath` | Optional: your own token file location (the path only, never the token). |
@@ -218,6 +223,7 @@ The `BepInEx/config/com.Fire.FiresDiscordIntegration.cfg` file has every setting
 | `Discord.ServerManager` | `ServerManagerChannelId` | Optional — separate channel for the panel if you don't want it in `StatusChannelId`. |
 | `Discord.Events` | `EnableStatusHeartbeat` | Turn the live panel on/off. |
 | `Discord.Events` | `Notify*` | Per-event toggles. Default to sensible "on" values; turn down the noise as you like. |
+| `Discord.Events` | `ChatRelayIgnorePrefixes` | Comma-separated words; a chat line starting with one is not posted to Discord (e.g. `bot` for commands typed to a bot; it doesn't catch `bottle`). Empty by default. |
 | `Discord.Events` | `DeathScreenshots` / `AchievementScreenshots` / `SkillLevelUpScreenshots` / `EwpPokeScreenshots` | Screenshot source toggles, all on by default. `SkillLevelUpMinLevel` / `SkillLevelUpStep` throttle skill posts. |
 | `Discord.Events` | `VanillaAchievementScreenshots` / `AllowAchievementsOnModdedProfile` | Valheim achievement screenshots (on) and the modded-game unlock override (off). See above. |
 | `Discord.ClientLogs` | `NotifyClientLoginArtifacts` / `AttachFullClientLogOnLogin` / `AttachModListOnLogin` / `AttachErrorsWarningsOnLogin` | Control what shows up on each login. |

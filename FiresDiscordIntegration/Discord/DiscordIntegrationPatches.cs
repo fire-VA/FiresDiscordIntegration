@@ -270,7 +270,7 @@ namespace FiresDiscordIntegration.Discord
                 }
                 else
                 {
-                    Debug.Log($"[Discord] Chat patch skipped: type {type} is not a relayable chat type (Ping ignored on purpose)");
+                    FiresLogger.LogDebug($"[Discord] Chat patch skipped: type {type} is not a relayable chat type (Ping ignored on purpose)");
                 }
             }
             catch (Exception ex)
@@ -339,13 +339,13 @@ namespace FiresDiscordIntegration.Discord
             if (_recentShouts.TryGetValue(key, out float seen) && now - seen < ShoutDedupSeconds)
             {
                 // Said too, so a proof round shows every path that saw the shout, not only the one that posted it.
-                Debug.Log($"[Discord] shout from '{name}' (peer {senderPeer}) also arrived via {via}: already relayed, not posted again");
+                FiresLogger.LogDebug($"[Discord] shout from '{name}' (peer {senderPeer}) also arrived via {via}: already relayed, not posted again");
                 return;
             }
             if (_recentShouts.Count > 64) _recentShouts.Clear();
             _recentShouts[key] = now;
 
-            Debug.Log($"[Discord] shout from '{name}' (peer {senderPeer}) via {via}");
+            FiresLogger.LogDebug($"[Discord] shout from '{name}' (peer {senderPeer}) via {via}");
             DiscordStatusTracker.RecordShout();
             bool relays = DiscordIntegrationCore.WillRelay(DiscordIntegrationCore.ChatLineType.Shout, text);
             DiscordIntegrationCore.OnPlayerChat(name, text, DiscordIntegrationCore.ChatLineType.Shout);

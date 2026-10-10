@@ -48,7 +48,7 @@ namespace FiresDiscordIntegration.ChatRelay
 
         private static void OnRelayed(long sender, string text)
         {
-            Debug.Log($"[Discord] the server relayed this client's shout to Discord: '{text}'");
+            FiresLogger.LogDebug($"[Discord] the server relayed this client's chat line to Discord: '{text}'");
             try { Relayed?.Invoke(text); }
             catch (Exception ex) { Debug.LogWarning($"[Discord] a Relayed listener threw: {ex.Message}"); }
         }
@@ -100,8 +100,12 @@ namespace FiresDiscordIntegration.ChatRelay
 
             if (string.IsNullOrEmpty(playerName) || string.IsNullOrEmpty(text)) return;
 
-            Debug.Log($"[Discord] ChatRelayRpc: received {lineType} from '{playerName}' (peer {sender}) — relaying.");
+            FiresLogger.LogDebug($"[Discord] ChatRelayRpc: received {lineType} from '{playerName}' (peer {sender}) — relaying.");
+            // 1.0.33 (Fire: "we can see that chat messages are relayed to discord"): a say or whisper answers its sender as a
+            // shout does, so a test can PASS on the server's own word (class_test fdi_chat).
+            bool relays = DiscordIntegrationCore.WillRelay(lineType, text);
             DiscordIntegrationCore.OnPlayerChat(playerName, text, lineType);
+            if (relays) TellRelayed(sender, text);
         }
     }
 

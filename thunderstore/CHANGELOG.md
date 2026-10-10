@@ -1,3 +1,4 @@
+* v1.0.34 - updates and optimizations for Valheim 1.0
 * v1.0.31 - updates and optimizations for Valheim 1.0
   - Random events (raids) now post to Discord from the server (new EventsWebhookUrl option); heartbeat edits retry quietly on Discord errors.
 
