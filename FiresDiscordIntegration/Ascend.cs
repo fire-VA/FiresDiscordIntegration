@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using BepInEx;
 using HarmonyLib;
@@ -13,37 +13,37 @@ using FiresDiscordIntegration.Utilities;
 namespace FiresDiscordIntegration
 {
     /// <summary>
-    /// FiresDiscordIntegration â€” standalone Discord â†” Valheim integration mod.
+    /// FiresDiscordIntegration — standalone Discord ↔ Valheim integration mod.
     ///
     /// Hosts:
-    ///   â€¢ DiscordIntegrationCore â€” webhook posting, bot listener, status tracker, mention
+    ///   • DiscordIntegrationCore — webhook posting, bot listener, status tracker, mention
     ///     resolver, emoji converter, crash detector. Server-side only.
-    ///   â€¢ ClientLogRelay â€” chunked clientâ†’server log transport, Discord webhook consumer,
+    ///   • ClientLogRelay — chunked client→server log transport, Discord webhook consumer,
     ///     disk consumer, server-driven log-request reactions, server heartbeat sentinel
     ///     for the auto-restart wrapper bat.
-    ///   â€¢ Server wrapper bat (deployed alongside the DLL) â€” polls Discord for restart/stop
+    ///   • Server wrapper bat (deployed alongside the DLL) — polls Discord for restart/stop
     ///     reactions, reads sentinel paths from this mod's config section.
     ///
-    ///     Hard-removed from this build (vs. the FiresRPGmaker version we forked from):
-    ///   â€¢ VAngarde anti-cheat reporting hooks â€” anti-cheat lives in FiresRPGmaker, the
+    ///     Not part of this standalone build:
+    ///   • VAngarde anti-cheat reporting hooks — anti-cheat lives in FiresRPGmaker, the
     ///     Discord anti-cheat webhook channel still exists but the mod-validator code
     ///     paths that fed it are not part of this standalone build.
     ///
     ///     Soft-deps:
-    ///   â€¢ Newtonsoft.Json â€” required by webhook poster + bot listener for Discord REST
+    ///   • Newtonsoft.Json — required by webhook poster + bot listener for Discord REST
     ///     payload (de)serialization. Usually present via Jotunn or BepInEx itself.
     ///     </summary>
     [BepInPlugin(PluginGUID, PluginName, PluginVersion)]
     [BepInDependency("com.Fire.FiresUnifiedCore", BepInDependency.DependencyFlags.HardDependency)]
     // Soft-dep so BepInEx loads ExpandWorldPrefabs BEFORE us when it's installed - EwpScreenshotPoke's
     // conditional Prepare() resolves EWP types at PatchAll time and silently skips if they aren't loaded
-    // yet (which is exactly what happened when we loaded first: line-126 vs line-285 in the boot log).
+    // yet.
     [BepInDependency("expand_world_prefabs", BepInDependency.DependencyFlags.SoftDependency)]
     public class FiresDiscordIntegrationPlugin : BaseUnityPlugin
     {
         public const string PluginGUID    = "com.Fire.FiresDiscordIntegration";
         public const string PluginName    = "FiresDiscordIntegration";
-        public const string PluginVersion = "1.0.31";
+        public const string PluginVersion = "1.0.43";
 
         public static FiresDiscordIntegrationPlugin Instance;
         public static readonly Harmony Harmony = new Harmony(PluginGUID);
@@ -65,20 +65,20 @@ namespace FiresDiscordIntegration
             {
                 DisplayName            = PluginName,
                 CurrentVersion         = PluginVersion,
-                MinimumRequiredVersion = PluginVersion,
+                MinimumRequiredVersion = "1.0.34" /* fixed: raise only when a synced key's name, type or meaning changes */,
             };
             // Minimal mod-level config (verbose flag + any future cross-cutting knobs).
             // Module-specific configs are bound by each module's own *Config.cs.
             ConfigManager.Instance.Initialize(Config);
 
-            // Module configs â€” these bind their own config entries into Config, then
+            // Module configs — these bind their own config entries into Config, then
             // register them with configSync for server-locking.
             DiscordIntegrationConfig.Initialize(Config);
             DiscordIntegrationConfig.BindToSync(configSync);
 
             // PatchAll wires up every [HarmonyPatch] class in the assembly. That
             // includes DiscordIntegrationPatches, DiscordCrashDetector, DiscordBotListener,
-            // DiscordStatusTracker, and ClientLogRelayIntegration itself â€” each of which
+            // DiscordStatusTracker, and ClientLogRelayIntegration itself — each of which
             // has Harmony patches on ZNet.Awake / ZNet.LoadWorld / Game lifecycle events
             // that handle their own self-initialization at the right moment (server vs
             // client). We don't need an explicit Discord/ClientLogRelay Init call here;
@@ -93,7 +93,7 @@ namespace FiresDiscordIntegration
             // Pre-warm DiscordBotIdentity. The /users/@me HTTP fetch is async and the
             // first webhook post that touches BotIdentity returns the fallback if the
             // fetch isn't complete yet. The ServerHeartbeat status panel is the
-            // earliest webhook consumer in the boot sequence â€” without this pre-warm,
+            // earliest webhook consumer in the boot sequence — without this pre-warm,
             // its FIRST post gets the configured fallback username + null avatar_url,
             // which Discord renders with the generic robot icon instead of the bot's
             // actual avatar. Discord doesn't update username/avatar on subsequent
@@ -106,7 +106,7 @@ namespace FiresDiscordIntegration
 
             // Pre-warm the @-mention role-name cache the same way.  The
             // Discord /guilds/{id}/roles fetch is async and on a freshly-booted
-            // server typically lands in ~1-2 seconds â€” but Chat.SendText on a
+            // server typically lands in ~1-2 seconds — but Chat.SendText on a
             // Shout can fire long before ZNet.LoadWorld's OnServerStart hook
             // would have kicked the fetch off, and a chat message that
             // contains an '@' otherwise ships to Discord as literal text on
@@ -114,7 +114,7 @@ namespace FiresDiscordIntegration
             // the cache is almost always warm by the time the first player
             // connects.  Safe on clients too: BotTokenFile.Token is empty
             // there (it loads only in the dedicated server executable), so the
-            // supervisor sits idle waiting for a token that will never come â€”
+            // supervisor sits idle waiting for a token that will never come —
             // clients get their role cache from the server via
             // DiscordRoleNameSync's RoutedRPC, not from a direct fetch.
             try { Discord.DiscordMentionResolver.FetchRoles(); }
@@ -131,7 +131,7 @@ namespace FiresDiscordIntegration
 
             Log.LogInfo($"v{PluginVersion} loaded.");
 
-            // Compact "ready" banner + Discord-link summary box â€” deferred to
+            // Compact "ready" banner + Discord-link summary box — deferred to
             // world-load time (ZNetScene up) so it bookends the load the same
             // way the other Fires* mods do (BIG = early-load, compact =
             // world-load). Runs headless too: no WaitForEndOfFrame, which
@@ -141,7 +141,7 @@ namespace FiresDiscordIntegration
 
         // Waits for ZNetScene + its prefab list to be live (same readiness
         // signal FGN uses), then emits the load-summary box and the compact
-        // loaded banner. Failure is non-fatal â€” falls back to a plain
+        // loaded banner. Failure is non-fatal — falls back to a plain
         // "loaded" log so the load event is still recorded.
         private IEnumerator EmitCompactBannerWhenZNetReady()
         {
@@ -174,7 +174,7 @@ namespace FiresDiscordIntegration
                     $"bot listener: {(DiscordBotListener.Running ? "on" : "off")}",
                     $"crash detector: {(ServerHeartbeat.CrashNotifierArmed ? "on" : "off")}",
                     heartbeat ? $"heartbeat: {ServerHeartbeat.IntervalSeconds:0}s" : "heartbeat: off",
-                    // 1.0.26: "relay: off" was read as the CHAT relay being off; it is the client log relay.
+                    // Spelled out so it is not mistaken for the chat relay.
                     ClientLogRelayIntegration.RelayActive ? "client log relay: on" : "client log relay: off",
                     ChatRelaySummary(out string chatDetail),
                 });
@@ -185,7 +185,7 @@ namespace FiresDiscordIntegration
         }
 
         // Where in-game chat goes: the webhook it resolves to (Chat, else General), the chat types switched on and whether the
-        // three shout hooks (1.0.28) are patched.
+        // three shout hooks are patched.
         private static string ChatRelaySummary(out string detail)
         {
             string hooks = $"shout hooks: {Hooked(typeof(Chat), nameof(Chat.SendText), "client relay")}, "

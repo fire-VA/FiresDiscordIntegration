@@ -176,6 +176,14 @@ namespace FiresDiscordIntegration.Discord
                 return;
             }
 
+            // Security: an admin id is a platform id (letters, digits, _ and -), never free text.
+            if (id.Length > 64 || !System.Text.RegularExpressions.Regex.IsMatch(id, @"^[A-Za-z0-9_-]+$"))
+            {
+                FiresLogger.LogWarning($"[Discord] admin {action} refused: the id is not a platform id ({id.Length} chars).");
+                Reply("That is not a valid platform id (letters, digits, _ and - only, up to 64).");
+                return;
+            }
+
             var adminList = LiveAdminList();
             if (adminList == null) { Reply("This server did not expose its admin list, so nothing was changed."); return; }
 

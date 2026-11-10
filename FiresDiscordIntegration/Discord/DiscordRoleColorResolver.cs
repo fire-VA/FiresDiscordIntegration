@@ -47,8 +47,6 @@ namespace FiresDiscordIntegration.Discord
         private static readonly Dictionary<string, string> _userColorHexById =
             new Dictionary<string, string>(StringComparer.Ordinal);
 
-        private static MonoBehaviour _host;
-
         /// <summary>
         /// Returns the cached display-color hex (e.g. "#7289DA") for a Discord
         /// user, or null if the user has no colored role.  Returns false when

@@ -26,6 +26,11 @@ namespace FiresDiscordIntegration.Discord
     /// </summary>
     public static class DiscordWebhookService
     {
+        private const int RequestTimeoutSeconds = 10;
+        private const int UploadTimeoutSeconds = 30;
+        // A rate-limit wait longer than this is not waited out before posting.
+        private const float MaxRateLimitWaitSeconds = 30f;
+
         private static float _rateLimitUntil;
         private static CoroutineHost _host;
 
@@ -40,7 +45,7 @@ namespace FiresDiscordIntegration.Discord
                    url.Contains("discordapp.com/api/webhooks/");
         }
 
-        // A webhook URL, or a "discord-bot-channel:<id>" target (test shots posted AS THE BOT, Fire 09-29 22:5x).
+        // A webhook URL, or a "discord-bot-channel:<id>" target (test shots posted AS THE BOT).
         internal static bool IsTarget(string url) => IsValidWebhookUrl(url) || BotChannelTarget.TryParse(url, out _);
 
         // Where a target posts, and the bot's Authorization header when it is a bot channel (null for a webhook). A bot
@@ -70,7 +75,8 @@ namespace FiresDiscordIntegration.Discord
             string content,
             string username = null,
             string avatarUrl = null,
-            IReadOnlyList<string> forceAllowedRoleIds = null)
+            IReadOnlyList<string> forceAllowedRoleIds = null,
+            bool allowRoleMentions = true)
         {
             if (!IsTarget(webhookUrl)) return;
             if (string.IsNullOrEmpty(content)) return;
@@ -82,7 +88,9 @@ namespace FiresDiscordIntegration.Discord
                 var payload = new Dictionary<string, object>
                 {
                     { "content", chunk },
-                    { "allowed_mentions", BuildAllowedMentions(forceAllowedRoleIds) },
+                    { "allowed_mentions", allowRoleMentions
+                        ? BuildAllowedMentions(forceAllowedRoleIds)
+                        : new Dictionary<string, object> { { "parse", new List<string> { "users" } } } },
                 };
 
                 if (!string.IsNullOrEmpty(username))
@@ -288,7 +296,7 @@ namespace FiresDiscordIntegration.Discord
             if (Time.unscaledTime < _rateLimitUntil)
             {
                 float wait = _rateLimitUntil - Time.unscaledTime;
-                if (wait > 0f && wait < 30f)
+                if (wait > 0f && wait < MaxRateLimitWaitSeconds)
                     yield return new WaitForSecondsRealtime(wait);
             }
 
@@ -313,7 +321,7 @@ namespace FiresDiscordIntegration.Discord
                 request.downloadHandler = new DownloadHandlerBuffer();
                 request.SetRequestHeader("Content-Type", "application/json");
                 if (auth != null) request.SetRequestHeader("Authorization", auth);
-                request.timeout = 10;
+                request.timeout = RequestTimeoutSeconds;
 
                 yield return request.SendWebRequest();
 
@@ -372,7 +380,7 @@ namespace FiresDiscordIntegration.Discord
             if (Time.unscaledTime < _rateLimitUntil)
             {
                 float wait = _rateLimitUntil - Time.unscaledTime;
-                if (wait > 0f && wait < 30f)
+                if (wait > 0f && wait < MaxRateLimitWaitSeconds)
                     yield return new WaitForSecondsRealtime(wait);
             }
 
@@ -417,7 +425,7 @@ namespace FiresDiscordIntegration.Discord
             using (var request = UnityWebRequest.Post(multipartUrl, form))
             {
                 if (multipartAuth != null) request.SetRequestHeader("Authorization", multipartAuth);
-                request.timeout = 30;
+                request.timeout = UploadTimeoutSeconds;
 
                 yield return request.SendWebRequest();
 

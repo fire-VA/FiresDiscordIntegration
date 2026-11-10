@@ -21,6 +21,10 @@ namespace FiresDiscordIntegration.ClientLogRelay.Webhook
     /// </summary>
     public static class MinimalWebhookPoster
     {
+        private const int UploadTimeoutSeconds = 30;
+        private const int RequestTimeoutSeconds = 15;
+        private const int DeleteTimeoutSeconds = 10;
+
         private const string BoundaryPrefix = "------ClientLogRelayBoundary";
 
         // Discord enforces a per-route rate limit on PUT /reactions/{emoji}/@me and
@@ -74,6 +78,29 @@ namespace FiresDiscordIntegration.ClientLogRelay.Webhook
                 : this(fileName, Encoding.UTF8.GetBytes(text ?? string.Empty), contentType) { }
         }
 
+        // No URL means relay posts are off: one Debug line, once. A URL that is set but malformed is a config mistake:
+        // one Warning per distinct value, naming only its length and start (the rest of a webhook URL is its token).
+        private static bool s_noUrlNoted;
+        private static readonly HashSet<string> s_badUrlsWarned = new HashSet<string>(StringComparer.Ordinal);
+        private const int UrlHintLength = 24;
+
+        private static void NoteSkippedPost(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                if (s_noUrlNoted)
+                    return;
+                s_noUrlNoted = true;
+                FiresLogger.LogDebug("[ClientLogRelay] No webhook URL set: relay posts are off.");
+                return;
+            }
+            if (!s_badUrlsWarned.Add(url))
+                return;
+            string hint = url.Length > UrlHintLength ? url.Substring(0, UrlHintLength) + "..." : url;
+            FiresLogger.LogWarning($"[ClientLogRelay] Webhook URL is not a Discord webhook (\"{hint}\", {url.Length} characters); "
+                + "posts to it are skipped. Expected https://discord.com/api/webhooks/... or a discord-bot-channel:<id> target.");
+        }
+
         public static bool IsValidWebhookUrl(string url)
         {
             if (string.IsNullOrEmpty(url) || !url.StartsWith("https://", StringComparison.Ordinal))
@@ -104,7 +131,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Webhook
         public static void Post(string webhookUrl, Embed embed, List<Attachment> files,
             string username, string avatarUrl, Action<string, string> onPosted)
         {
-            // A "discord-bot-channel:<id>" target (test shots, Fire 09-29 22:5x) posts AS THE BOT to that channel: the bot
+            // A "discord-bot-channel:<id>" target (test shots) posts AS THE BOT to that channel: the bot
             // API has no username/avatar override, so those are dropped.
             string botChannel = null;
             if (FiresDiscordIntegration.Discord.BotChannelTarget.TryParse(webhookUrl, out botChannel))
@@ -114,13 +141,13 @@ namespace FiresDiscordIntegration.ClientLogRelay.Webhook
             }
             else if (!IsValidWebhookUrl(webhookUrl))
             {
-                Debug.LogWarning("[ClientLogRelay] Invalid webhook URL; skipping post");
+                NoteSkippedPost(webhookUrl);
                 onPosted?.Invoke(null, null);
                 return;
             }
 
-            // The body (the embed's JSON plus every attachment's bytes) is built on the relay's worker thread: a test
-            // screenshot's post spent 57 ms of a dedi frame building it (R24). The request still starts on the main
+            // The body (the embed's JSON plus every attachment's bytes) is built on the relay's worker thread: building a
+            // screenshot post on the main thread cost a server frame tens of ms. The request still starts on the main
             // thread, a frame or two later, in the order the posts were made.
             ClientLogRelayWorker.Prepare();
             ClientLogRelayWorker.Enqueue(() =>
@@ -163,7 +190,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Webhook
                 req.downloadHandler = new DownloadHandlerBuffer();
                 req.SetRequestHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
                 if (botChannel != null) req.SetRequestHeader("Authorization", FiresDiscordIntegration.Discord.BotChannelTarget.AuthHeader());
-                req.timeout = 30;
+                req.timeout = UploadTimeoutSeconds;
 
                 yield return req.SendWebRequest();
 
@@ -353,7 +380,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Webhook
                 // "Content-Length is managed automatically" warning.
                 req.downloadHandler = new DownloadHandlerBuffer();
                 req.SetRequestHeader("Authorization", $"Bot {botToken}");
-                req.timeout = 15;
+                req.timeout = RequestTimeoutSeconds;
 
                 yield return req.SendWebRequest();
 
@@ -397,7 +424,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Webhook
             using (var req = UnityWebRequest.Get(url))
             {
                 req.SetRequestHeader("Authorization", $"Bot {botToken}");
-                req.timeout = 15;
+                req.timeout = RequestTimeoutSeconds;
                 yield return req.SendWebRequest();
 
 #if UNITY_2020_1_OR_NEWER
@@ -487,7 +514,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Webhook
                     using (var delReq = UnityWebRequest.Delete(deleteUrl))
                     {
                         delReq.SetRequestHeader("Authorization", $"Bot {botToken}");
-                        delReq.timeout = 10;
+                        delReq.timeout = DeleteTimeoutSeconds;
                         yield return delReq.SendWebRequest();
 
 #if UNITY_2020_1_OR_NEWER

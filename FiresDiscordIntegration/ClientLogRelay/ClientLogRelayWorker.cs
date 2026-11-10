@@ -9,7 +9,7 @@ namespace FiresDiscordIntegration.ClientLogRelay
     /// One background thread for the server's relayed client logs: parsing the log, diffing the mod lists and
     /// rewriting the player's folder, run in the order it was queued so a login snapshot, its re-pushes and a
     /// disconnect post for one player never interleave. The routed-RPC handlers only hand over bytes they have
-    /// already reassembled (R20: OnServerReceiveLog stalled the dedi 281 ms on the main thread). Anything that
+    /// already reassembled (doing this work on the main thread stalled the server for hundreds of ms). Anything that
     /// starts a coroutine (the Discord posts) goes back through FiresCore's MainThreadDispatcher. Drained when
     /// the plugin shuts down, so a log queued just before quit still lands on disk.
     /// </summary>

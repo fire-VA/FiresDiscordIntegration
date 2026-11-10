@@ -29,8 +29,8 @@ namespace FiresDiscordIntegration
                 "General",
                 "VerboseLogging",
                 false,
-                "Emit additional debug logs for the Discord/log-relay subsystems. " +
-                "Off by default \u2014 most operators only want this on for troubleshooting.");
+                new ConfigDescription("Write extra debug lines to the log for troubleshooting.", null,
+                    new ConfigurationManagerAttributes { Browsable = false }));
 
             FiresCore.Config.ConfigHotReload.Watch(config);
         }

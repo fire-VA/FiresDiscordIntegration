@@ -29,10 +29,11 @@ namespace FiresDiscordIntegration.Discord
         internal const string RpcName      = "FiresDiscord_RoleNames";
         internal const string RpcNameUsers = "FiresDiscord_UserNames";
 
-        // Tracks whether we've registered the RPC handler this server session.
-        // ZRoutedRpc.Register survives until the ZNet teardown; double-registering
-        // would no-op but is also pointless.
-        private static bool _registered;
+        // Tracks which ZRoutedRpc we registered the handlers on. Registrations die with
+        // that instance, and each new session creates a new one, so a bare flag would
+        // skip registering on the next session.
+        private static ZRoutedRpc _registeredOn;
+        private static bool _registered => _registeredOn != null && _registeredOn == ZRoutedRpc.instance;
 
         public static void RegisterRpcHandlers()
         {
@@ -40,12 +41,12 @@ namespace FiresDiscordIntegration.Discord
             if (ZRoutedRpc.instance == null) return;
             ZRoutedRpc.instance.Register<ZPackage>(RpcName,      OnReceiveRoles);
             ZRoutedRpc.instance.Register<ZPackage>(RpcNameUsers, OnReceiveUsers);
-            _registered = true;
+            _registeredOn = ZRoutedRpc.instance;
         }
 
         public static void ClearRegistration()
         {
-            _registered = false;
+            _registeredOn = null;
         }
 
         public static void BroadcastToAllPeers(IReadOnlyList<DiscordRoleSummary> roles)
@@ -77,9 +78,16 @@ namespace FiresDiscordIntegration.Discord
         // ends up holding the same list the mention resolver already has, which
         // matters for listen-server hosts who run both server + client roles in
         // the same process and need the cache for their own chat overlay.
+        private static bool FromServer(long sender)
+        {
+            long serverId = ZRoutedRpc.instance != null ? ZRoutedRpc.instance.GetServerPeerID() : 0L;
+            return serverId != 0L && sender == serverId;
+        }
+
         private static void OnReceiveRoles(long _sender, ZPackage pkg)
         {
             if (pkg == null) return;
+            if (!FromServer(_sender)) { Debug.LogWarning($"[Discord] RoleNameSync: dropped a list from non-server sender {_sender}."); return; }
             int count = pkg.ReadInt();
             if (count < 0 || count > MaxAcceptedRoleCount)
             {
@@ -105,6 +113,7 @@ namespace FiresDiscordIntegration.Discord
         private static void OnReceiveUsers(long _sender, ZPackage pkg)
         {
             if (pkg == null) return;
+            if (!FromServer(_sender)) { Debug.LogWarning($"[Discord] RoleNameSync: dropped a list from non-server sender {_sender}."); return; }
             int count = pkg.ReadInt();
             if (count < 0 || count > MaxAcceptedUserCount)
             {

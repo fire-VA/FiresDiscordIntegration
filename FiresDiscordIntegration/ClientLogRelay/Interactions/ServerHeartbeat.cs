@@ -19,6 +19,18 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
     /// </summary>
     public static class ServerHeartbeat
     {
+        private const int RequestTimeoutSeconds = 15;
+        private const int ShortRequestTimeoutSeconds = 10;
+        // Pause after every few deletes to stay under Discord's rate limit.
+        private const float DeleteBatchPauseSeconds = 0.5f;
+        // Gives the status message id time to be set before reactions are seeded.
+        private const float SeedReactionsDelaySeconds = 2f;
+        // Gives the status message time to be posted and seeded before polling starts.
+        private const float ReactionPollStartDelaySeconds = 10f;
+        private const float ReactionPollIntervalSeconds = 30f;
+        // Lets the status edit and the flag file land before the process quits.
+        private const float QuitAfterFlagSeconds = 3f;
+
         private const string DiscordApiBase = "https://discord.com/api/v10";
         private const float HeartbeatIntervalSeconds = 60f;
         private const string SentinelFileName = "server_heartbeat.json";
@@ -124,7 +136,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
             using (var req = UnityWebRequest.Get(url))
             {
                 req.SetRequestHeader("Authorization", $"Bot {_botToken}");
-                req.timeout = 15;
+                req.timeout = RequestTimeoutSeconds;
                 yield return req.SendWebRequest();
 
                 if (req.responseCode == 200)
@@ -167,8 +179,8 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
                                 var embedObj = embedItem as JObject;
                                 string title = embedObj?["title"]?.ToString() ?? "";
 
-                                if (title.Contains("Server Online") || 
-                                    title.Contains("Server Offline") || 
+                                if (title.Contains("Server Online") ||
+                                    title.Contains("Server Offline") ||
                                     title.Contains("Server Restarting") ||
                                     title.Contains("Server Stopped") ||
                                     title.Contains("Server Crash"))
@@ -188,7 +200,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
                             using (var deleteReq = UnityWebRequest.Delete(deleteUrl))
                             {
                                 deleteReq.SetRequestHeader("Authorization", $"Bot {_botToken}");
-                                deleteReq.timeout = 10;
+                                deleteReq.timeout = ShortRequestTimeoutSeconds;
                                 yield return deleteReq.SendWebRequest();
 
                                 if (deleteReq.responseCode == 204)
@@ -200,7 +212,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
 
                             // Small delay to avoid rate limiting
                             if (deletedCount > 0 && deletedCount % 3 == 0)
-                                yield return new WaitForSeconds(0.5f);
+                                yield return new WaitForSeconds(DeleteBatchPauseSeconds);
                         }
 
                         if (deletedCount > 0)
@@ -223,7 +235,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
             string json = BuildEmbedPayload(embed);
 
             // Use webhook API instead of bot API to allow custom username/avatar
-            string url = !string.IsNullOrEmpty(_statusWebhookUrl) 
+            string url = !string.IsNullOrEmpty(_statusWebhookUrl)
                 ? $"{_statusWebhookUrl}?wait=true"  // Webhook with wait=true returns message object
                 : $"{DiscordApiBase}/channels/{_channelId}/messages";  // Fallback to bot API
 
@@ -240,7 +252,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
                 }
 
                 req.SetRequestHeader("Content-Type", "application/json");
-                req.timeout = 15;
+                req.timeout = RequestTimeoutSeconds;
 
                 yield return req.SendWebRequest();
 
@@ -278,7 +290,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
         private static IEnumerator SeedReactions()
         {
             // Wait a moment for message ID to be set
-            yield return new WaitForSeconds(2f);
+            yield return new WaitForSeconds(SeedReactionsDelaySeconds);
 
             if (string.IsNullOrEmpty(_statusMessageId) || string.IsNullOrEmpty(_channelId))
             {
@@ -345,7 +357,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
                             req.SetRequestHeader("Authorization", $"Bot {_botToken}");
 
                         req.SetRequestHeader("Content-Type", "application/json");
-                        req.timeout = 10;
+                        req.timeout = ShortRequestTimeoutSeconds;
                         yield return req.SendWebRequest();
 
                         code = req.responseCode;
@@ -445,14 +457,14 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
         private static IEnumerator ReactionPollLoop()
         {
             // Wait for message to be posted and reactions to be seeded
-            yield return new WaitForSeconds(10f);
+            yield return new WaitForSeconds(ReactionPollStartDelaySeconds);
             yield return ResolveBotUserId();
 
             string[] emojis = { EMOJI_RESTART, EMOJI_STOP };
 
             while (!_cleanShutdown)
             {
-                yield return new WaitForSecondsRealtime(30f); // Increased from 15s to reduce rate limits
+                yield return new WaitForSecondsRealtime(ReactionPollIntervalSeconds); // Long enough to stay clear of Discord rate limits
                 if (_cleanShutdown) yield break;
                 if (string.IsNullOrEmpty(_statusMessageId) || string.IsNullOrEmpty(_channelId))
                     continue;
@@ -465,7 +477,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
                     using (var req = UnityWebRequest.Get(url))
                     {
                         req.SetRequestHeader("Authorization", $"Bot {_botToken}");
-                        req.timeout = 10;
+                        req.timeout = ShortRequestTimeoutSeconds;
                         yield return req.SendWebRequest();
                         if (req.responseCode != 200) continue;
 
@@ -521,7 +533,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
             using (var req = UnityWebRequest.Get(url))
             {
                 req.SetRequestHeader("Authorization", $"Bot {_botToken}");
-                req.timeout = 10;
+                req.timeout = ShortRequestTimeoutSeconds;
                 yield return req.SendWebRequest();
 
                 if (req.responseCode == 200)
@@ -654,7 +666,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
 
             WriteFlag("restart_requested.flag", $"Restart requested by {reqByName} at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
 
-            yield return new WaitForSeconds(3f);
+            yield return new WaitForSeconds(QuitAfterFlagSeconds);
             Application.Quit();
         }
 
@@ -674,7 +686,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
 
             WriteFlag("stop_requested.flag", $"Stop requested by {reqByName} at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
 
-            yield return new WaitForSeconds(3f);
+            yield return new WaitForSeconds(QuitAfterFlagSeconds);
             Application.Quit();
         }
 
@@ -820,7 +832,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
                 if (needsBotAuth)
                     req.SetRequestHeader("Authorization", $"Bot {_botToken}");
                 req.SetRequestHeader("Content-Type", "application/json");
-                req.timeout = 10;
+                req.timeout = ShortRequestTimeoutSeconds;
                 yield return req.SendWebRequest();
 
 #if UNITY_2020_1_OR_NEWER

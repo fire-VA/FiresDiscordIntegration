@@ -19,6 +19,7 @@ namespace FiresDiscordIntegration.ChatRelay
         public const int MaxFrames = 500;
         public const int MaxBytes = 50 * 1024 * 1024;
         public const int MaxDimension = 1024;
+        public const long MaxDecodedPixels = 64L * 1024 * 1024; // all frames together (256 MB RGBA)
 
         public struct GifResult
         {
@@ -51,6 +52,13 @@ namespace FiresDiscordIntegration.ChatRelay
                     // Logical Screen Descriptor
                     int width = reader.ReadUInt16();
                     int height = reader.ReadUInt16();
+                    // Security: the screen size and the total decoded pixels are capped before anything is allocated.
+                    if (width <= 0 || height <= 0 || width > MaxDimension || height > MaxDimension)
+                    {
+                        UnityEngine.Debug.LogWarning($"[ChatMedia] GIF refused: {width}x{height} is over {MaxDimension}px.");
+                        return null;
+                    }
+                    int frameCap = (int)Math.Max(1L, Math.Min((long)MaxFrames, MaxDecodedPixels / ((long)width * height)));
                     byte packed = reader.ReadByte();
                     reader.ReadByte(); // bg color index
                     reader.ReadByte(); // pixel aspect ratio
@@ -72,7 +80,7 @@ namespace FiresDiscordIntegration.ChatRelay
                     int transparentIndex = -1;
                     bool hasTransparency = false;
 
-                    while (stream.Position < stream.Length && frames.Count < MaxFrames)
+                    while (stream.Position < stream.Length && frames.Count < frameCap)
                     {
                         int block = reader.ReadByte();
 

@@ -11,13 +11,19 @@ using UnityEngine.Networking;
 namespace FiresDiscordIntegration.Discord
 {
     /// <summary>
-    /// FDI's side of Core's <see cref="DiscordBridge"/> (Fire 09-29 23:1x: FDI is public, so folder work lives in a private
-    /// tool that reaches Discord "through core"). Network only: posts to a channel AS THE BOT and polls watched channels,
+    /// FDI's side of Core's <see cref="DiscordBridge"/>, so other tools can reach Discord through Core without
+    /// holding the bot token. Network only: posts to a channel AS THE BOT and polls watched channels,
     /// raising <see cref="DiscordBridge.RaiseChannelMessage"/> for each new message. Server-side (set at world load, cleared at
     /// quit). The bot token never leaves FDI.
     /// </summary>
     public static class DiscordBridgeProvider
     {
+        // Uploads can carry large files, so they get a long timeout.
+        private const int UploadTimeoutSeconds = 120;
+        private const int RequestTimeoutSeconds = 15;
+        // Back-off after Discord answers 429.
+        private const float RateLimitBackoffSeconds = 5f;
+
         private const string ApiBase = "https://discord.com/api/v10";
         private const float WatchSeconds = 2f;
         private const int TextLimit = 1990;
@@ -72,7 +78,7 @@ namespace FiresDiscordIntegration.Discord
             using (var req = UnityWebRequest.Post(BotChannelTarget.MessagesUrl(channel), form))
             {
                 req.SetRequestHeader("Authorization", BotChannelTarget.AuthHeader());
-                req.timeout = 120;
+                req.timeout = UploadTimeoutSeconds;
                 yield return req.SendWebRequest();
                 if (req.responseCode >= 200 && req.responseCode < 300)
                 {
@@ -110,7 +116,7 @@ namespace FiresDiscordIntegration.Discord
         {
             var req = UnityWebRequest.Get(url);
             req.SetRequestHeader("Authorization", BotChannelTarget.AuthHeader());
-            req.timeout = 15;
+            req.timeout = RequestTimeoutSeconds;
             return req;
         }
 
@@ -140,7 +146,7 @@ namespace FiresDiscordIntegration.Discord
                 using (var req = Get($"{ApiBase}/channels/{channel}/messages?after={last}&limit=20"))
                 {
                     yield return req.SendWebRequest();
-                    if (req.responseCode == 429) { yield return new WaitForSecondsRealtime(5f); continue; }
+                    if (req.responseCode == 429) { yield return new WaitForSecondsRealtime(RateLimitBackoffSeconds); continue; }
                     if (req.responseCode != 200) continue;
                     JArray arr = null;
                     try { arr = JArray.Parse(req.downloadHandler.text); } catch { }

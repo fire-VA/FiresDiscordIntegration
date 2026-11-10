@@ -16,20 +16,23 @@ namespace FiresDiscordIntegration.ChatRelay
     /// machine pushes a (name, text, type) packet to the server every time
     /// Chat.SendText fires for a Say/Whisper, and the server replays it through
     /// the regular OnPlayerChat pipeline.  Shouts are read on the server's routed
-    /// RPC receive path instead (DiscordIntegrationPatches, 1.0.27: vanilla sends a
-    /// 1.0 shout to the server as "ChatMessage"), so they never come through here.
+    /// RPC receive path instead (DiscordIntegrationPatches: vanilla sends a
+    /// shout to the server as "ChatMessage"), so they never come through here.
     /// </summary>
     internal static class ChatRelayRpc
     {
         internal const string RpcName = "FiresDiscord_ChatRelay";
 
-        // 1.0.27: the server tells a shouter's client that its shout was relayed to Discord. A client without the handler ignores it.
+        // The server tells a shouter's client that its shout was relayed to Discord. A client without the handler ignores it.
         internal const string RelayedRpcName = "FiresDiscord_ChatRelayed";
 
         /// <summary>Raised on the shouter's client when the server relayed its shout to Discord: the shout's text.</summary>
         public static event Action<string> Relayed;
 
-        private static bool _registered;
+        // Registrations live on one ZRoutedRpc instance; a new session gets a new
+        // instance, so remember which one we registered on rather than a bare flag.
+        private static ZRoutedRpc _registeredOn;
+        private static bool _registered => _registeredOn != null && _registeredOn == ZRoutedRpc.instance;
 
         public static void RegisterRpcHandlers()
         {
@@ -37,7 +40,7 @@ namespace FiresDiscordIntegration.ChatRelay
             if (ZRoutedRpc.instance == null) return;
             ZRoutedRpc.instance.Register<ZPackage>(RpcName, OnReceive);
             ZRoutedRpc.instance.Register<string>(RelayedRpcName, OnRelayed);
-            _registered = true;
+            _registeredOn = ZRoutedRpc.instance;
         }
 
         internal static void TellRelayed(long peer, string text)
@@ -48,12 +51,19 @@ namespace FiresDiscordIntegration.ChatRelay
 
         private static void OnRelayed(long sender, string text)
         {
-            Debug.Log($"[Discord] the server relayed this client's shout to Discord: '{text}'");
+            long serverId = ZRoutedRpc.instance != null ? ZRoutedRpc.instance.GetServerPeerID() : 0L;
+            if (serverId == 0L || sender != serverId)
+            {
+                FiresLogger.LogWarning($"[Discord] dropped a ChatRelayed notice from non-server sender {sender}.");
+                return;
+            }
+            if (text != null && text.Length > ChatSecurity.MaxTextLength) text = text.Substring(0, ChatSecurity.MaxTextLength);
+            FiresLogger.LogDebug($"[Discord] the server relayed this client's chat line to Discord: '{text}'");
             try { Relayed?.Invoke(text); }
             catch (Exception ex) { Debug.LogWarning($"[Discord] a Relayed listener threw: {ex.Message}"); }
         }
 
-        public static void ClearRegistration() { _registered = false; }
+        public static void ClearRegistration() { _registeredOn = null; }
 
         // Server-side handler.  We do all of the filtering here (rather than
         // refusing to send on the client) so a stale client running against a
@@ -80,13 +90,24 @@ namespace FiresDiscordIntegration.ChatRelay
                 return;
             }
 
+            // Security: the name comes from the sender's connection, never from the packet.
+            string peerName = ChatSecurity.SenderName(sender, playerName);
+            if (string.IsNullOrEmpty(peerName))
+            {
+                FiresLogger.LogWarning($"[Discord] ChatRelayRpc: dropped a line from unknown peer {sender}.");
+                return;
+            }
+            if (peerName != playerName)
+                FiresLogger.LogDebug($"[Discord] ChatRelayRpc: peer {sender} claimed name '{playerName}'; using its connection name '{peerName}'.");
+            playerName = peerName;
+
             var senderType = (Talker.Type)typeRaw;
             DiscordIntegrationCore.ChatLineType lineType;
             if      (senderType == Talker.Type.Normal)  lineType = DiscordIntegrationCore.ChatLineType.Say;
             else if (senderType == Talker.Type.Whisper) lineType = DiscordIntegrationCore.ChatLineType.Whisper;
             else if (senderType == Talker.Type.Shout)
             {
-                // 1.0.28: Valheim 1.0 sends a shout to each recipient, and the shouter's own copy never leaves its machine, so a
+                // Valheim sends a shout to each recipient, and the shouter's own copy never leaves its machine, so a
                 // shout with nobody else online never reaches the server. The shouter's client relays it here instead;
                 // RelayShout de-duplicates it against the copies the server routes on to other players.
                 DiscordIntegrationPatches.RelayShout(playerName, sender, text, "client relay");
@@ -99,9 +120,17 @@ namespace FiresDiscordIntegration.ChatRelay
             }
 
             if (string.IsNullOrEmpty(playerName) || string.IsNullOrEmpty(text)) return;
+            if (!ChatSecurity.Allow(sender))
+            {
+                FiresLogger.LogWarning($"[Discord] ChatRelayRpc: rate limit hit for peer {sender}; line not relayed.");
+                return;
+            }
 
-            Debug.Log($"[Discord] ChatRelayRpc: received {lineType} from '{playerName}' (peer {sender}) — relaying.");
+            FiresLogger.LogDebug($"[Discord] ChatRelayRpc: received {lineType} from '{playerName}' (peer {sender}) — relaying.");
+            // A say or whisper answers its sender the way a shout does, so the sender can confirm the line reached Discord.
+            bool relays = DiscordIntegrationCore.WillRelay(lineType, text);
             DiscordIntegrationCore.OnPlayerChat(playerName, text, lineType);
+            if (relays) TellRelayed(sender, text);
         }
     }
 
@@ -374,7 +403,7 @@ namespace FiresDiscordIntegration.ChatRelay
         // chat types over a tiny custom routed RPC so the server-side relay
         // can still post them.
         //
-        // Shouts go through it too (1.0.28): Valheim 1.0 sends a shout to each
+        // Shouts go through it too: Valheim sends a shout to each
         // recipient (Chat.CheckPermissionsAndSendChatMessageRPCsAsync), the
         // shouter's own copy never leaves its machine, so with nobody else
         // online the server never sees one.  The server de-duplicates this

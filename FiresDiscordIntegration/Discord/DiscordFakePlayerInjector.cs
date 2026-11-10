@@ -64,6 +64,7 @@ namespace FiresDiscordIntegration.Discord
         // (platform, id) string-compare, so two constructions with the same
         // inputs will match.
         private static PlatformUserID? _cachedFakeUserId;
+        private static bool? _lastAdded;   // 1.0.43: the "[Discord] relay sender entry added/omitted" line prints once per change
 
         /// <summary>
         /// The synthetic PlatformUserID used as the sender for Discord-relayed
@@ -119,6 +120,24 @@ namespace FiresDiscordIntegration.Discord
             {
                 if (__instance == null || !__instance.IsServer()) return;
                 if (__instance.m_players == null) return;
+
+                // 1.0.43 (Fire 10-27, a player: webhook-only servers still showed "[Discord]" and time never froze on an empty server):
+                // the entry exists only for DiscordBotListener.RelayToGameChat's sender lookup, so it is added only when the bot listener
+                // relays (Discord Enabled AND EnableBotListener), and only while a real player is in the list - vanilla UpdateNetTime
+                // advances time while m_players.Count > 0, so an empty server now counts 0 and freezes time as vanilla does.
+                bool bot = DiscordIntegrationConfig.Enabled != null && DiscordIntegrationConfig.Enabled.Value
+                           && DiscordIntegrationConfig.EnableBotListener != null && DiscordIntegrationConfig.EnableBotListener.Value;
+                int real = 0;
+                for (int i = 0; i < __instance.m_players.Count; i++)
+                    if (__instance.m_players[i].m_userInfo.m_id != FakeUserId) real++;
+                bool add = bot && real > 0;
+                string state = $"{(add ? "added" : "omitted")} (bot listener {(bot ? "on" : "off")}, real players {real})";
+                if (add != _lastAdded)
+                {
+                    _lastAdded = add;
+                    Debug.Log($"[Discord] relay sender entry {state}");
+                }
+                if (!add) return;
 
                 // Idempotency guard: UpdatePlayerList runs every time
                 // SendPlayerList is invoked (peer join/leave, position

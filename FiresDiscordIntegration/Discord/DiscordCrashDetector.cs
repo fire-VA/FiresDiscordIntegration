@@ -39,6 +39,9 @@ namespace FiresDiscordIntegration.Discord
     /// </summary>
     public static class DiscordCrashDetector
     {
+        private const int RequestTimeoutSeconds = 15;
+        private const int ShortRequestTimeoutSeconds = 10;
+
         private const string DiscordApiBase = "https://discord.com/api/v10";
         private const float HeartbeatIntervalSeconds = 60f;
         private const string SentinelFileName = "server_heartbeat.json";
@@ -119,7 +122,7 @@ namespace FiresDiscordIntegration.Discord
                 req.downloadHandler = new DownloadHandlerBuffer();
                 req.SetRequestHeader("Authorization", $"Bot {_botToken}");
                 req.SetRequestHeader("Content-Type", "application/json");
-                req.timeout = 15;
+                req.timeout = RequestTimeoutSeconds;
 
                 yield return req.SendWebRequest();
 
@@ -187,7 +190,7 @@ namespace FiresDiscordIntegration.Discord
                     req.downloadHandler = new DownloadHandlerBuffer();
                     req.SetRequestHeader("Authorization", $"Bot {_botToken}");
                     req.SetRequestHeader("Content-Type", "application/json");
-                    req.timeout = 10;
+                    req.timeout = ShortRequestTimeoutSeconds;
 
                     yield return req.SendWebRequest();
 

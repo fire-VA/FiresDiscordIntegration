@@ -22,6 +22,11 @@ namespace FiresDiscordIntegration.Discord
     /// </summary>
     public static class DiscordMentionResolver
     {
+        private const int ShortRequestTimeoutSeconds = 10;
+        private const int RequestTimeoutSeconds = 15;
+        // How often a caller waiting for the role/member cache re-checks it.
+        private const float CacheWarmPollSeconds = 0.2f;
+
         private const string DiscordApiBase = "https://discord.com/api/v10";
 
         // Cached role name -> role ID mapping (lowercase name -> ID string)
@@ -152,12 +157,12 @@ namespace FiresDiscordIntegration.Discord
 
             float deadline = Time.unscaledTime + Mathf.Max(0.1f, timeoutSeconds);
             while (Time.unscaledTime < deadline && !(HasRoles && HasAttemptedMembersFetch))
-                yield return new WaitForSecondsRealtime(0.2f);
+                yield return new WaitForSecondsRealtime(CacheWarmPollSeconds);
 
             onReady();
         }
 
-        public static MentionResolutionResult ResolveMentions(string message)
+        public static MentionResolutionResult ResolveMentions(string message, bool resolveRoles = true)
         {
             if (string.IsNullOrEmpty(message))
                 return EmptyResult(message);
@@ -202,7 +207,7 @@ namespace FiresDiscordIntegration.Discord
                 // user (rare but possible) resolves to the role.  Server-wide
                 // pings are usually the intent when the same name exists in
                 // both buckets.
-                if (haveRoles)
+                if (haveRoles && resolveRoles)
                 {
                     string roleId = ResolveRoleIdForTypedName(typedName);
                     if (roleId != null)
@@ -436,7 +441,7 @@ namespace FiresDiscordIntegration.Discord
             using (var request = UnityWebRequest.Get(url))
             {
                 request.SetRequestHeader("Authorization", $"Bot {token}");
-                request.timeout = 10;
+                request.timeout = ShortRequestTimeoutSeconds;
 
                 yield return request.SendWebRequest();
 
@@ -552,7 +557,7 @@ namespace FiresDiscordIntegration.Discord
                 using (var request = UnityWebRequest.Get(url))
                 {
                     request.SetRequestHeader("Authorization", $"Bot {token}");
-                    request.timeout = 15;
+                    request.timeout = RequestTimeoutSeconds;
                     yield return request.SendWebRequest();
 
                     if (request.responseCode == 403)

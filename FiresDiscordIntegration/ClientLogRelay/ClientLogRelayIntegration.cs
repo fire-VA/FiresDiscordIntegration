@@ -43,6 +43,15 @@ namespace FiresDiscordIntegration.ClientLogRelay
     [HarmonyPatch]
     public static class ClientLogRelayIntegration
     {
+        // Extra wait after the player is ready, so the push lands outside the spawn burst.
+        private const float PostSpawnGraceSeconds = 2f;
+        // A package this large is still sent, but logged as a warning (Steam's per-message limit is 512 KB).
+        private const int LargePackageWarnBytes = 420000;
+        // How often timed-out chunked transfers are dropped on the server.
+        private const float TransferCleanupIntervalSeconds = 30f;
+        // Lets disconnect cleanup finish before the disconnect log is posted.
+        private const float DisconnectPostDelaySeconds = 1f;
+
         // Subfolder under {BepInEx config}/ used by ClientLogRelayPaths.
         // Logs land in {BepInEx config}/FiresDiscordIntegration/ClientLogs/.
         private const string MOD_ID = "FiresDiscordIntegration";
@@ -107,7 +116,7 @@ namespace FiresDiscordIntegration.ClientLogRelay
 
         // Log bytes per routed RPC, sent one per frame. Steam allows 512 KB per message, but the server copies each
         // payload several times on the main thread (socket, routed RPC, this handler), so a 400 KB chunk cost the
-        // dedi 110-118 ms per call under memory pressure (R22c); small chunks spread that over frames.
+        // server over 100 ms per call under memory pressure; small chunks spread that over frames.
         private const int CHUNK_BYTES = 64 * 1024;
 
         // ====================== CONFIG SHIM ======================
@@ -168,13 +177,19 @@ namespace FiresDiscordIntegration.ClientLogRelay
         private static bool _initialized;
         private static bool _isServerSide;
 
+        // The server-side consumers and pollers start once per process, even when the
+        // role flips between client and server sessions.
+        private static bool _serverStarted;
+
         internal static bool RelayActive => _initialized && (!_isServerSide || MasterEnabled);
 
         public static void InitServer()
         {
-            if (_initialized) return;
+            if (_initialized && _isServerSide) return;
             _initialized = true;
             _isServerSide = true;
+            if (_serverStarted) return;
+            _serverStarted = true;
             ClientLogRelayWorker.Prepare();
 
             if (!MasterEnabled)
@@ -195,7 +210,7 @@ namespace FiresDiscordIntegration.ClientLogRelay
 
         public static void InitClient()
         {
-            if (_initialized) return;
+            if (_initialized && !_isServerSide) return;
             _initialized = true;
             _isServerSide = false;
             FiresLogger.LogVerbose("[ClientLogRelay] Client-side integration initialised (will push log on connect).");
@@ -337,17 +352,14 @@ namespace FiresDiscordIntegration.ClientLogRelay
         {
             try
             {
-                // Auto-init based on ZNet role.  RPG maker has no separate plugin Awake
-                // we can hook for the relay, so the very first ZNet.Awake doubles as the
-                // init point.  Idempotent: second/third reconnect is a no-op for
-                // InitServer/InitClient but still re-registers the per-session RPCs below.
-                if (!_initialized)
-                {
-                    if (__instance != null && __instance.IsServer())
-                        InitServer();
-                    else
-                        InitClient();
-                }
+                // Init from the ZNet role on every Awake: the same process can host a
+                // world after playing as a client, so the role is re-read each session.
+                // InitServer/InitClient are no-ops when the role is unchanged; the
+                // per-session RPCs below are re-registered either way.
+                if (__instance != null && __instance.IsServer())
+                    InitServer();
+                else
+                    InitClient();
 
                 if (ZRoutedRpc.instance == null)
                 {
@@ -447,12 +459,9 @@ namespace FiresDiscordIntegration.ClientLogRelay
             // Waiting for PlayerSpawnGate ensures we push only when the engine
             // has finished its post-spawn finalisation - no more competition with
             // dungeon load, no more "frozen at Spawning dungeon" symptom.
-            // DIAG (login-freeze investigation): ClientLogRelay's push fires ~2s
-            // after the spawn gate flips and synchronously reads the local
-            // LogOutput.log (potentially multi-MB). That lands right in the
-            // wayshrine-response window we're trying to bisect \u2014 log the
-            // milestones so the next repro shows whether ClientLogRelay is
-            // running concurrently with the freeze. Remove once fixed.
+            // The push reads the local LogOutput.log (potentially multi-MB)
+            // shortly after spawn; these verbose milestones show when that
+            // work overlaps other login activity.
             FiresLogger.LogVerbose("[ClientLogRelay][DIAG] DelayedClientPush ENTER (waiting for PlayerSpawnGate to open)");
 
             // Wait for the spawn gate, retrying in 30-second chunks instead of
@@ -506,7 +515,7 @@ namespace FiresDiscordIntegration.ClientLogRelay
             FiresLogger.LogVerbose("[ClientLogRelay][DIAG] DelayedClientPush playerReady=true, entering 2s post-ready grace");
 
             // Small additional grace so we land outside the spawn-burst window.
-            yield return new WaitForSeconds(2f);
+            yield return new WaitForSeconds(PostSpawnGraceSeconds);
 
             FiresLogger.LogVerbose("[ClientLogRelay][DIAG] DelayedClientPush 2s grace elapsed, about to call PushLogToServerCoroutine");
 
@@ -599,7 +608,7 @@ namespace FiresDiscordIntegration.ClientLogRelay
                 metaPayload.Write(steamId ?? string.Empty);
 
                 byte[] metaData = metaPayload.GetArray();
-                if (metaData != null && metaData.Length > 420000)
+                if (metaData != null && metaData.Length > LargePackageWarnBytes)
                     Debug.LogWarning($"[ClientLogRelay] Metadata ZPackage is {metaData.Length}B - very large mod list!");
 
                 if (ZRoutedRpc.instance == null)
@@ -638,7 +647,7 @@ namespace FiresDiscordIntegration.ClientLogRelay
                 payload.Write(chunk);
 
                 byte[] packageData = payload.GetArray();
-                if (packageData != null && packageData.Length > 420000)
+                if (packageData != null && packageData.Length > LargePackageWarnBytes)
                     Debug.LogWarning($"[ClientLogRelay] CRITICAL: Chunk {chunkIndex + 1} ZPackage is {packageData.Length}B!");
 
                 ZRoutedRpc.instance.InvokeRoutedRPC(serverId, RPC_SUBMIT, payload);
@@ -690,7 +699,7 @@ namespace FiresDiscordIntegration.ClientLogRelay
         {
             while (true)
             {
-                yield return new WaitForSeconds(30f);
+                yield return new WaitForSeconds(TransferCleanupIntervalSeconds);
                 ClientLogChunkedTransfer.CleanupTimedOutTransfers();
             }
         }
@@ -811,6 +820,11 @@ namespace FiresDiscordIntegration.ClientLogRelay
                     // This is the metadata message (mod list + steam ID)
                     int modCount = pkg.ReadInt();
                     if (modCount < 0) modCount = 0;
+                    if (modCount > MaxMetadataMods)
+                    {
+                        FiresLogger.LogWarning($"[ClientLogRelay] Dropped metadata from peer {sender}: {modCount} mods (cap {MaxMetadataMods}).");
+                        return;
+                    }
                     Dictionary<string, string> metaModList = new Dictionary<string, string>(modCount, StringComparer.OrdinalIgnoreCase);
                     for (int i = 0; i < modCount; i++)
                     {
@@ -852,9 +866,7 @@ namespace FiresDiscordIntegration.ClientLogRelay
                 FiresLogger.LogVerbose($"[ClientLogRelay] \u2190 Complete log received from peer {sender}: {fullLog.Length}B, {modList.Count} mods");
 
                 string playerName = GetPeerPlayerName(sender);
-                string platformId = !string.IsNullOrEmpty(reportedSteamId)
-                    ? reportedSteamId
-                    : sender.ToString();
+                string platformId = PeerPlatformId(sender, reportedSteamId);
 
                 // Debounce layer 1: per-peer once per session.
                 lock (_debounceLock)
@@ -899,8 +911,8 @@ namespace FiresDiscordIntegration.ClientLogRelay
                     _peerToPlayerName[sender] = playerName;
                 }
 
-                // Parsing the log, diffing the mod lists and writing the folder cost one dedi frame 281 ms
-                // (R20), so the worker runs the fan-out; the Discord consumers post back on the main thread.
+                // Parsing the log, diffing the mod lists and writing the folder can stall a server frame for
+                // hundreds of ms, so the worker runs the fan-out; the Discord consumers post back on the main thread.
                 int clientModCount = modList.Count;
                 int serverModCount = serverMods != null ? serverMods.Count : 0;
                 ClientLogRelayWorker.Enqueue(() =>
@@ -969,14 +981,29 @@ namespace FiresDiscordIntegration.ClientLogRelay
                 else
                 {
                     // LEGACY SINGLE-MESSAGE PROTOCOL (backward compat)
+                    // Security: cap the size before reading, and allow one legacy update per peer per minute.
+                    if (firstInt < 0 || firstInt > LegacyUpdateMaxBytes || firstInt > pkg.Size() - 4)
+                    {
+                        FiresLogger.LogWarning($"[ClientLogRelay] Dropped legacy log update from peer {sender}: {firstInt} bytes (cap {LegacyUpdateMaxBytes}).");
+                        return;
+                    }
+                    lock (_debounceLock)
+                    {
+                        if (_lastLegacyUpdateUtc.Count > 512) _lastLegacyUpdateUtc.Clear();
+                        if (_lastLegacyUpdateUtc.TryGetValue(sender, out DateTime lastUtc)
+                            && (DateTime.UtcNow - lastUtc).TotalSeconds < LegacyUpdateMinIntervalSeconds)
+                        {
+                            FiresLogger.LogWarning($"[ClientLogRelay] Dropped legacy log update from peer {sender}: rate limit ({LegacyUpdateMinIntervalSeconds:F0}s).");
+                            return;
+                        }
+                        _lastLegacyUpdateUtc[sender] = DateTime.UtcNow;
+                    }
                     log = pkg.ReadByteArray();
                     try { reportedSteamId = pkg.ReadString(); } catch { }
                 }
 
                 string playerName = GetPeerPlayerName(sender);
-                string platformId = !string.IsNullOrEmpty(reportedSteamId)
-                    ? reportedSteamId
-                    : sender.ToString();
+                string platformId = PeerPlatformId(sender, reportedSteamId);
 
                 if (log == null || log.Length == 0)
                 {
@@ -1052,6 +1079,11 @@ namespace FiresDiscordIntegration.ClientLogRelay
 
         // Peer UID -> platformId mapping so the disconnect hook knows who just left.
         // Populated by both OnServerReceiveLog and OnServerReceiveLogUpdate.
+        private const int LegacyUpdateMaxBytes = 8 * 1024 * 1024;
+        private const double LegacyUpdateMinIntervalSeconds = 60.0;
+        private const int MaxMetadataMods = 2048;
+        private static readonly Dictionary<long, DateTime> _lastLegacyUpdateUtc = new Dictionary<long, DateTime>();
+
         private static readonly Dictionary<long, string> _peerToPlatformId
             = new Dictionary<long, string>();
         private static readonly Dictionary<long, string> _peerToPlayerName
@@ -1108,7 +1140,7 @@ namespace FiresDiscordIntegration.ClientLogRelay
         private static IEnumerator PostDisconnectLogAsync(string platformId, string playerName, string requestedByName)
         {
             // Small delay to ensure disconnect cleanup is complete
-            yield return new WaitForSeconds(1f);
+            yield return new WaitForSeconds(DisconnectPostDelaySeconds);
 
             // The worker reads the cached log after any rewrite still queued for this player, then
             // hands the bytes back to the main thread, where the webhook post starts its coroutine.
@@ -1239,6 +1271,31 @@ namespace FiresDiscordIntegration.ClientLogRelay
         // ====================================================================
         // Helpers
         // ====================================================================
+        // Security: the platform id that keys a player's log folder and disconnect log comes from the sender's own
+        // connection (as DeathScreenshots does), never from the id the client reports; it is reduced to a safe file name.
+        private const int MaxPlatformIdLength = 64;
+        private static string PeerPlatformId(long sender, string reported)
+        {
+            var peer = ZNet.instance?.GetPeer(sender);
+            string id = peer?.m_socket?.GetHostName();
+            if (string.IsNullOrEmpty(id)) id = sender.ToString();
+            if (!string.IsNullOrEmpty(reported) && reported != id)
+                FiresLogger.LogDebug($"[ClientLogRelay] peer {sender} reported platform id '{SafeFileToken(reported)}'; using its connection id.");
+            return SafeFileToken(id);
+        }
+
+        private static string SafeFileToken(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "unknown";
+            var sb = new System.Text.StringBuilder(Math.Min(s.Length, MaxPlatformIdLength));
+            for (int i = 0; i < s.Length && sb.Length < MaxPlatformIdLength; i++)
+            {
+                char c = s[i];
+                sb.Append((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' ? c : '_');
+            }
+            return sb.Length == 0 ? "unknown" : sb.ToString();
+        }
+
         private static string GetPeerPlayerName(long uid)
         {
             if (ZNet.instance == null) return "unknown";

@@ -35,6 +35,8 @@ namespace FiresDiscordIntegration.Discord
     /// </summary>
     public static class DiscordBotIdentity
     {
+        private const int RequestTimeoutSeconds = 10;
+
         private const string DiscordApiBase = "https://discord.com/api/v10";
 
         // Cached results from the first successful @me query.
@@ -124,7 +126,7 @@ namespace FiresDiscordIntegration.Discord
             using (var req = UnityWebRequest.Get(url))
             {
                 req.SetRequestHeader("Authorization", $"Bot {token}");
-                req.timeout = 10;
+                req.timeout = RequestTimeoutSeconds;
                 yield return req.SendWebRequest();
 
                 if (req.result == UnityWebRequest.Result.Success)

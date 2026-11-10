@@ -109,6 +109,7 @@
     <!-- PlayerSpawnGate now lives in FiresUnifiedCore (FiresCore.Lifecycle.PlayerSpawnGate);
          used via the FUC DLL reference - no longer source-linked. -->
     <Compile Include="Utilities\BotTokenFile.cs" />
+    <Compile Include="Utilities\ConfigurationManagerAttributes.cs" />
     <Compile Include="Utilities\FdiHelpContent.cs" />
     <Compile Include="Utilities\FiresDiscordBanner.cs" />
     <Compile Include="Utilities\FiresLogger.cs" />
@@ -119,6 +120,7 @@
     <Compile Include="Chat\ChatMediaEmbed.cs" />
     <Compile Include="Chat\ChatMediaEmbedManager.cs" />
     <Compile Include="Chat\ChatPatches.cs" />
+    <Compile Include="Chat\ChatSecurity.cs" />
     <Compile Include="Chat\GifDecoder.cs" />
     <Compile Include="Discord\DeathScreenshots.cs" />
     <Compile Include="Discord\EwpScreenshotPoke.cs" />

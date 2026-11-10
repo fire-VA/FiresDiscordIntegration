@@ -30,6 +30,8 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
     /// </summary>
     public sealed class ReactionPoller : MonoBehaviour
     {
+        private const int RequestTimeoutSeconds = 15;
+
         /// <summary>
         /// ConsumerId marking a registered message as a VAngarde server-list card (not a player login
         /// snapshot). A MODS reaction on such a message serves the live four-list dump instead of the
@@ -259,7 +261,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
             using (var req = UnityWebRequest.Get("https://discord.com/api/v10/users/@me"))
             {
                 req.SetRequestHeader("Authorization", $"Bot {botToken}");
-                req.timeout = 15;
+                req.timeout = RequestTimeoutSeconds;
                 yield return req.SendWebRequest();
 
 #if UNITY_2020_1_OR_NEWER
@@ -299,7 +301,7 @@ namespace FiresDiscordIntegration.ClientLogRelay.Interactions
             using (var req = UnityWebRequest.Get(url))
             {
                 req.SetRequestHeader("Authorization", $"Bot {botToken}");
-                req.timeout = 15;
+                req.timeout = RequestTimeoutSeconds;
                 yield return req.SendWebRequest();
 
 #if UNITY_2020_1_OR_NEWER

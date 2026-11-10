@@ -40,9 +40,8 @@ namespace FiresDiscordIntegration.ChatRelay
         // (the RPG-maker hover tooltip) so the @-mention hint reads as
         // "part of the same UI family".  Values copied verbatim so a tweak
         // there can land here in one edit too.  Background is intentionally
-        // 0.95 alpha (almost solid) — the original 0.85 let the chat
-        // scrollback bleed through and made the role names hard to read
-        // (visible in the operator's repro screenshot from 2026-05-14).
+        // 0.95 alpha (almost solid): a lighter panel lets the chat
+        // scrollback bleed through and makes the role names hard to read.
         private static readonly Color PanelBackgroundColor = new Color(0.08f, 0.06f, 0.04f, 0.95f);
         private static readonly Color PanelOutlineColor    = new Color(0.5f,  0.4f,  0.25f, 0.8f);
         private static readonly Vector2 PanelOutlineDistance = new Vector2(2f, -2f);
@@ -183,17 +182,31 @@ namespace FiresDiscordIntegration.ChatRelay
             // TMP's MaterialReference..ctor every frame the panel is visible.
             if (!EnsureFontAssetReady()) { HidePanel(); return; }
 
-            var matches = DiscordRoleNameCache.FilterForHint(typedAfterAt, MaxHintRows);
-            if (matches.Count == 0)
+            // 1.0.42 ([classes-ui] UI efficiency audit D1): filter + rebuild the text (StringBuilder, ForceMeshUpdate) only when the
+            // typed token changes, or every RefreshSeconds so a role-list sync still shows; otherwise the panel keeps last frame's text.
+            if (typedAfterAt != _lastToken || Time.unscaledTime >= _nextRefresh)
+            {
+                _lastToken = typedAfterAt;
+                _nextRefresh = Time.unscaledTime + RefreshSeconds;
+                var matches = DiscordRoleNameCache.FilterForHint(typedAfterAt, MaxHintRows);
+                _lastMatchCount = matches.Count;
+                if (matches.Count > 0) UpdatePanelText(typedAfterAt, matches);
+            }
+            if (_lastMatchCount == 0)
             {
                 HidePanel();
                 return;
             }
 
-            UpdatePanelText(typedAfterAt, matches);
             UpdatePanelPosition();
             ShowPanel();
         }
+
+        private const float RefreshSeconds = 2f;
+        private string _lastToken;
+        private float _nextRefresh;
+        private int _lastMatchCount;
+        private readonly System.Text.StringBuilder _sb = new System.Text.StringBuilder(256);
 
         // Returns the chars the player has typed after the last '@' in the chat
         // input, ONLY if that '@' is the most recent word-boundary character
@@ -257,7 +270,7 @@ namespace FiresDiscordIntegration.ChatRelay
 
         private void UpdatePanelText(string typedAfterAt, List<DiscordRoleSummary> matches)
         {
-            var sb = new System.Text.StringBuilder();
+            var sb = _sb; sb.Clear();
             string header = string.IsNullOrEmpty(typedAfterAt)
                 ? "Discord roles you can @mention:"
                 : $"@{typedAfterAt}…";

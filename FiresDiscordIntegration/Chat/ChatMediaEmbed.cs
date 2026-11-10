@@ -18,11 +18,55 @@ namespace FiresDiscordIntegration.ChatRelay
     /// </summary>
     public class ChatMediaEmbed : MonoBehaviour
     {
+        // Request timeouts (seconds): the media itself, the fallback URL, and the quick oEmbed lookup.
+        private const int MediaDownloadTimeoutSeconds = 30;
+        private const int FallbackDownloadTimeoutSeconds = 15;
+        private const int OEmbedTimeoutSeconds = 5;
+
         private const float MaxEmbedWidth = 697f;  // ContainerWidth (713) minus padding
         private const float MaxEmbedHeight = 380f;  // ~half container height for comfortable stacking
         private const float LifetimeSeconds = 30f;
         // Client-side HTTP download — no Steam networking involved.
-        private const int MaxDownloadBytes = 50 * 1024 * 1024;
+        private const int MaxDownloadBytes = 8 * 1024 * 1024;   // Security: the download aborts past this while reading
+
+        private static readonly string[] AllowedMediaHosts = { "cdn.discordapp.com", "media.discordapp.net", "media.tenor.com", "media.giphy.com", "i.giphy.com" };
+
+        internal static bool IsAllowedMediaUrl(string url)
+        {
+            if (string.IsNullOrEmpty(url) || url.Length > 2048) return false;
+            if (!System.Uri.TryCreate(url, System.UriKind.Absolute, out var uri)) return false;
+            if (uri.Scheme != System.Uri.UriSchemeHttps || !uri.IsDefaultPort || !string.IsNullOrEmpty(uri.UserInfo)) return false;
+            for (int i = 0; i < AllowedMediaHosts.Length; i++)
+                if (string.Equals(uri.Host, AllowedMediaHosts[i], System.StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        private static string SafeHost(string url) =>
+            System.Uri.TryCreate(url ?? "", System.UriKind.Absolute, out var u) ? u.Host : "(invalid url)";
+
+        // Collects the body and aborts the request once it passes the cap (and up front when Content-Length says so).
+        private sealed class CappedDownloadHandler : DownloadHandlerScript
+        {
+            private readonly int _cap;
+            private readonly System.IO.MemoryStream _ms = new System.IO.MemoryStream();
+            public CappedDownloadHandler(int cap) : base(new byte[64 * 1024]) { _cap = cap; }
+            protected override bool ReceiveData(byte[] chunk, int length)
+            {
+                if (chunk == null || length <= 0) return true;
+                if (_ms.Length + length > _cap)
+                {
+                    Debug.LogWarning($"[ChatMedia] Download aborted: over {_cap} bytes.");
+                    return false;
+                }
+                _ms.Write(chunk, 0, length);
+                return true;
+            }
+            protected override void ReceiveContentLengthHeader(ulong contentLength)
+            {
+                if (contentLength > (ulong)_cap) Debug.LogWarning($"[ChatMedia] Download refused: Content-Length {contentLength} is over {_cap} bytes.");
+            }
+            protected override byte[] GetData() => _ms.ToArray();
+        }
 
         private RawImage _image;
         private Texture2D[] _gifFrames;
@@ -58,62 +102,37 @@ namespace FiresDiscordIntegration.ChatRelay
 
         private IEnumerator DownloadAndDisplay(string url, ChatMediaDetector.MediaType mediaType)
         {
-            // ── Resolve page/share URLs to direct media URLs ──
+            // ── Resolve page/share URLs to direct media URLs (no network: Tenor/Giphy pages map to their media hosts) ──
             string resolvedUrl = null;
             yield return ResolveMediaUrl(url, result => resolvedUrl = result);
             if (!string.IsNullOrEmpty(resolvedUrl))
                 url = resolvedUrl;
 
+            // Security: only https media on the allow-listed hosts is fetched (no IP leak to arbitrary hosts, no LAN requests).
+            if (!IsAllowedMediaUrl(url))
+            {
+                FiresLogger.LogDebug($"[ChatMedia] Not fetched (host not allowed): {SafeHost(url)}");
+                DestroyLoadingLabel();
+                Destroy(gameObject);
+                yield break;
+            }
+
             Debug.Log($"[ChatMedia] Downloading: {url}");
 
-            // ── First download attempt ──
             byte[] data = null;
-            bool success = false;
-
-            using (var request = UnityWebRequest.Get(url))
-            {
-                request.timeout = 30;
-                request.SetRequestHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VerdantsAscent/1.0");
-
-                yield return request.SendWebRequest();
-
-                if (request.result == UnityWebRequest.Result.Success)
-                {
-                    data = request.downloadHandler.data;
-                    success = data != null && data.Length > 0 && data.Length <= MaxDownloadBytes;
-                }
-                else
-                {
-                    Debug.LogWarning($"[ChatMedia] First attempt failed ({request.responseCode}): {request.error} — URL: {url}");
-                }
-            }
+            yield return FetchAllowed(url, MediaDownloadTimeoutSeconds, d => data = d);
+            bool success = data != null && data.Length > 0;
 
             // ── Retry with fallback URL on failure ──
             if (!success)
             {
                 string fallbackUrl = BuildFallbackUrl(url);
-                if (!string.IsNullOrEmpty(fallbackUrl) && fallbackUrl != url)
+                if (!string.IsNullOrEmpty(fallbackUrl) && fallbackUrl != url && IsAllowedMediaUrl(fallbackUrl))
                 {
                     Debug.Log($"[ChatMedia] Retrying with fallback: {fallbackUrl}");
-                    using (var retry = UnityWebRequest.Get(fallbackUrl))
-                    {
-                        retry.timeout = 15;
-                        retry.SetRequestHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VerdantsAscent/1.0");
-
-                        yield return retry.SendWebRequest();
-
-                        if (retry.result == UnityWebRequest.Result.Success)
-                        {
-                            data = retry.downloadHandler.data;
-                            success = data != null && data.Length > 0 && data.Length <= MaxDownloadBytes;
-                            if (success)
-                                Debug.Log($"[ChatMedia] Fallback succeeded: {fallbackUrl}");
-                        }
-                        else
-                        {
-                            Debug.LogWarning($"[ChatMedia] Fallback also failed ({retry.responseCode}): {retry.error}");
-                        }
-                    }
+                    yield return FetchAllowed(fallbackUrl, FallbackDownloadTimeoutSeconds, d => data = d);
+                    success = data != null && data.Length > 0;
+                    if (success) Debug.Log($"[ChatMedia] Fallback succeeded: {fallbackUrl}");
                 }
             }
 
@@ -156,11 +175,115 @@ namespace FiresDiscordIntegration.ChatRelay
             }
         }
 
+        // Security: decoded-size caps for plain (non-GIF) images.
+        private const int MaxStaticImageSide = 4096;
+        private const long MaxStaticImagePixels = 16L * 1024 * 1024;
+        private static bool s_warnedHeaderTooLarge;
+        private static bool s_warnedDecodedTooLarge;
+
+        private static bool IsWithinStaticCaps(long w, long h) =>
+            w > 0 && h > 0 && w <= MaxStaticImageSide && h <= MaxStaticImageSide && w * h <= MaxStaticImagePixels;
+
+        // Reads width/height from a PNG, JPEG or WebP header without decoding. False when the header is not recognised.
+        internal static bool TryReadImageHeaderSize(byte[] d, out int width, out int height)
+        {
+            width = 0; height = 0;
+            if (d == null) return false;
+            try
+            {
+                // PNG: signature, then IHDR width/height (big-endian) at 16..23.
+                if (d.Length >= 24 && d[0] == 0x89 && d[1] == 0x50 && d[2] == 0x4E && d[3] == 0x47
+                    && d[12] == (byte)'I' && d[13] == (byte)'H' && d[14] == (byte)'D' && d[15] == (byte)'R')
+                {
+                    long pw = ((long)d[16] << 24) | ((long)d[17] << 16) | ((long)d[18] << 8) | d[19];
+                    long ph = ((long)d[20] << 24) | ((long)d[21] << 16) | ((long)d[22] << 8) | d[23];
+                    width = (int)System.Math.Min(pw, int.MaxValue); height = (int)System.Math.Min(ph, int.MaxValue);
+                    return true;
+                }
+                // JPEG: walk the markers to the first SOFn.
+                if (d.Length >= 4 && d[0] == 0xFF && d[1] == 0xD8)
+                {
+                    int i = 2;
+                    while (i + 3 < d.Length)
+                    {
+                        if (d[i] != 0xFF) return false;
+                        byte m = d[i + 1];
+                        if (m == 0xFF) { i++; continue; }
+                        if (m == 0xD8 || m == 0x01 || (m >= 0xD0 && m <= 0xD7)) { i += 2; continue; }
+                        if (m == 0xD9 || m == 0xDA) return false;
+                        int len = (d[i + 2] << 8) | d[i + 3];
+                        if (len < 2) return false;
+                        bool sof = m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC;
+                        if (sof)
+                        {
+                            if (i + 8 >= d.Length) return false;
+                            height = (d[i + 5] << 8) | d[i + 6];
+                            width = (d[i + 7] << 8) | d[i + 8];
+                            return true;
+                        }
+                        i += 2 + len;
+                    }
+                    return false;
+                }
+                // WebP: RIFF....WEBP then VP8 / VP8L / VP8X.
+                if (d.Length >= 30 && d[0] == 'R' && d[1] == 'I' && d[2] == 'F' && d[3] == 'F'
+                    && d[8] == 'W' && d[9] == 'E' && d[10] == 'B' && d[11] == 'P' && d[12] == 'V' && d[13] == 'P' && d[14] == '8')
+                {
+                    byte k = d[15];
+                    if (k == ' ')
+                    {
+                        width = (d[26] | (d[27] << 8)) & 0x3FFF;
+                        height = (d[28] | (d[29] << 8)) & 0x3FFF;
+                        return true;
+                    }
+                    if (k == 'L')
+                    {
+                        uint b = (uint)(d[21] | (d[22] << 8) | (d[23] << 16) | (d[24] << 24));
+                        width = (int)(b & 0x3FFF) + 1;
+                        height = (int)((b >> 14) & 0x3FFF) + 1;
+                        return true;
+                    }
+                    if (k == 'X')
+                    {
+                        width = (d[24] | (d[25] << 8) | (d[26] << 16)) + 1;
+                        height = (d[27] | (d[28] << 8) | (d[29] << 16)) + 1;
+                        return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
         private void LoadAsStaticImage(byte[] data)
         {
+            // Security: refuse oversized images from the header before decoding.
+            if (TryReadImageHeaderSize(data, out int hw, out int hh) && !IsWithinStaticCaps(hw, hh))
+            {
+                if (!s_warnedHeaderTooLarge)
+                {
+                    s_warnedHeaderTooLarge = true;
+                    Debug.LogWarning($"[ChatMedia] Refused image: header says {hw}x{hh} (cap {MaxStaticImageSide} px per side, {MaxStaticImagePixels} pixels).");
+                }
+                Destroy(gameObject);
+                return;
+            }
+
             var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
             if (LoadImageSafe(tex, data))
             {
+                // Security: check again after decoding (covers headers we could not read).
+                if (!IsWithinStaticCaps(tex.width, tex.height))
+                {
+                    if (!s_warnedDecodedTooLarge)
+                    {
+                        s_warnedDecodedTooLarge = true;
+                        Debug.LogWarning($"[ChatMedia] Refused image: decoded {tex.width}x{tex.height} (cap {MaxStaticImageSide} px per side, {MaxStaticImagePixels} pixels).");
+                    }
+                    Object.Destroy(tex);
+                    Destroy(gameObject);
+                    return;
+                }
                 ApplyTexture(tex, tex.width, tex.height);
             }
             else
@@ -361,6 +484,65 @@ namespace FiresDiscordIntegration.ChatRelay
             return data.Length >= 3 && data[0] == 'G' && data[1] == 'I' && data[2] == 'F';
         }
 
+        private const int MaxRedirectHops = 3;
+
+        // Security: GET with redirects off; each 3xx hop is re-checked against the host allow-list (max 3 hops),
+        // the body is capped while reading, and only image/gif, png, jpeg or webp responses are accepted.
+        private IEnumerator FetchAllowed(string url, int timeoutSeconds, System.Action<byte[]> done)
+        {
+            byte[] result = null;
+            for (int hop = 0; hop <= MaxRedirectHops; hop++)
+            {
+                if (!IsAllowedMediaUrl(url))
+                {
+                    Debug.LogWarning($"[ChatMedia] Refused: hop {hop} host not allowed ({SafeHost(url)}).");
+                    break;
+                }
+                string next = null;
+                using (var request = UnityWebRequest.Get(url))
+                {
+                    request.redirectLimit = 0;
+                    request.downloadHandler = new CappedDownloadHandler(MaxDownloadBytes);
+                    request.timeout = timeoutSeconds;
+                    request.SetRequestHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VerdantsAscent/1.0");
+
+                    yield return request.SendWebRequest();
+
+                    long code = request.responseCode;
+                    if (code >= 300 && code < 400)
+                    {
+                        string loc = request.GetResponseHeader("Location");
+                        if (string.IsNullOrEmpty(loc) || !System.Uri.TryCreate(new System.Uri(url), loc, out var target))
+                        {
+                            Debug.LogWarning($"[ChatMedia] Refused: redirect {code} without a usable Location.");
+                            break;
+                        }
+                        next = target.AbsoluteUri;
+                    }
+                    else if (request.result == UnityWebRequest.Result.Success)
+                    {
+                        string ct = (request.GetResponseHeader("Content-Type") ?? "").Split(';')[0].Trim().ToLowerInvariant();
+                        if (ct != "image/gif" && ct != "image/png" && ct != "image/jpeg" && ct != "image/jpg" && ct != "image/webp")
+                        {
+                            Debug.LogWarning($"[ChatMedia] Refused: content type '{ct}' is not an image.");
+                            break;
+                        }
+                        var d = request.downloadHandler.data;
+                        if (d != null && d.Length > 0 && d.Length <= MaxDownloadBytes) result = d;
+                        break;
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[ChatMedia] Download failed ({code}): {request.error} — host {SafeHost(url)}");
+                        break;
+                    }
+                }
+                if (hop == MaxRedirectHops) { Debug.LogWarning($"[ChatMedia] Refused: more than {MaxRedirectHops} redirects."); break; }
+                url = next;
+            }
+            done(result);
+        }
+
         /// <summary>
         /// Resolve share/page URLs from Tenor, Giphy, Klipy etc. to direct
         /// media URLs.  Returns null if no resolution is needed (URL is
@@ -371,7 +553,9 @@ namespace FiresDiscordIntegration.ChatRelay
             // ── Tenor page URL → direct GIF via oEmbed ──
             if (url.Contains("tenor.com/view/"))
             {
-                yield return ResolveTenorOEmbed(url, callback);
+                // Security: no oEmbed request to tenor.com (not on the allow-list); build the media.tenor.com link from the GIF id.
+                string tenorId = ExtractTenorGifId(url);
+                callback(string.IsNullOrEmpty(tenorId) ? null : $"https://media.tenor.com/images/{tenorId}/tenor.gif");
                 yield break;
             }
 
@@ -423,7 +607,7 @@ namespace FiresDiscordIntegration.ChatRelay
 
             using (var request = UnityWebRequest.Get(oembedUrl))
             {
-                request.timeout = 5;
+                request.timeout = OEmbedTimeoutSeconds;
                 request.SetRequestHeader("User-Agent", "Mozilla/5.0 VerdantsAscent/1.0");
 
                 yield return request.SendWebRequest();

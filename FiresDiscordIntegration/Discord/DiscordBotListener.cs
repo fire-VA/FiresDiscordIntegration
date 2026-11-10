@@ -21,6 +21,13 @@
         /// </summary>
         public static class DiscordBotListener
         {
+            private const int ShortRequestTimeoutSeconds = 10;
+            private const int RequestTimeoutSeconds = 15;
+            // Back-off after Discord answers 429.
+            private const float RateLimitBackoffSeconds = 5f;
+            // Pause between message deletes to stay under Discord's rate limit.
+            private const float DeletePauseSeconds = 0.5f;
+
             private const string DiscordApiBase = "https://discord.com/api/v10";
 
             private static MonoBehaviour _host;
@@ -106,7 +113,7 @@
                 using (var request = UnityWebRequest.Get(url))
                 {
                     request.SetRequestHeader("Authorization", $"Bot {token}");
-                    request.timeout = 10;
+                    request.timeout = ShortRequestTimeoutSeconds;
 
                     yield return request.SendWebRequest();
 
@@ -162,7 +169,7 @@
                 using (var request = UnityWebRequest.Get(url))
                 {
                     request.SetRequestHeader("Authorization", $"Bot {token}");
-                    request.timeout = 10;
+                    request.timeout = ShortRequestTimeoutSeconds;
 
                     yield return request.SendWebRequest();
 
@@ -205,7 +212,7 @@
                 using (var request = UnityWebRequest.Get(url))
                 {
                     request.SetRequestHeader("Authorization", $"Bot {token}");
-                    request.timeout = 10;
+                    request.timeout = ShortRequestTimeoutSeconds;
 
                     yield return request.SendWebRequest();
 
@@ -268,7 +275,7 @@
                     else if (request.responseCode == 429)
                     {
                         LogVerbose("Bot listener rate limited, backing off");
-                        yield return new WaitForSecondsRealtime(5f);
+                        yield return new WaitForSecondsRealtime(RateLimitBackoffSeconds);
                     }
                     else if (request.responseCode > 0)
                     {
@@ -448,7 +455,7 @@
             /// Inject a message into the Valheim server chat as a Normal-type
             /// say from a synthetic "[Discord]" sender.
             ///
-            /// HOW IT WORKS (after 2026-05-30 fix):
+            /// HOW IT WORKS:
             ///   * <see cref="DiscordFakePlayerInjector"/> adds a fake
             ///     PlayerInfo (UserId = <see cref="DiscordFakePlayerInjector.FakeUserId"/>)
             ///     to <see cref="ZNet.m_players"/> server-side. SendPlayerList
@@ -458,7 +465,7 @@
             ///     Terminal.AddString and succeed because the fake entry is in
             ///     their local player list. The chat scrollback receives the
             ///     entry under the "[Discord]" display name.
-            ///   * Talker.Type.Normal (vs the previous Talker.Type.Shout)
+            ///   * Talker.Type.Normal (rather than Talker.Type.Shout)
             ///     renders as a small white floating bubble instead of the
             ///     yellow uppercase shout (which moved with the camera and
             ///     was suppressed entirely under NoMap).
@@ -767,7 +774,7 @@
                 using (var request = UnityWebRequest.Get(url))
                 {
                     request.SetRequestHeader("Authorization", $"Bot {token}");
-                    request.timeout = 15;
+                    request.timeout = RequestTimeoutSeconds;
 
                     yield return request.SendWebRequest();
 
@@ -812,7 +819,7 @@
                             yield return DeleteMessage(token, channelId, messageId);
                             deletedCount++;
                             // Small delay to avoid rate limiting
-                            yield return new WaitForSecondsRealtime(0.5f);
+                            yield return new WaitForSecondsRealtime(DeletePauseSeconds);
                         }
                     }
 
@@ -833,7 +840,7 @@
                 using (var request = UnityWebRequest.Delete(url))
                 {
                     request.SetRequestHeader("Authorization", $"Bot {token}");
-                    request.timeout = 10;
+                    request.timeout = ShortRequestTimeoutSeconds;
 
                     yield return request.SendWebRequest();
 

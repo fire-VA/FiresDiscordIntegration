@@ -27,6 +27,9 @@ namespace FiresDiscordIntegration.Discord
     [HarmonyPatch]
     public static class DiscordIntegrationPatches
     {
+        // The shout de-dup table is cleared once it holds more entries than this.
+        private const int MaxRecentShouts = 64;
+
         // Track which players have joined (by Steam ID) to distinguish
         // first RPC_CharacterID (join) from subsequent ones (death/respawn).
         private static readonly HashSet<string> _joinedPlayers = new HashSet<string>();
@@ -45,24 +48,10 @@ namespace FiresDiscordIntegration.Discord
             try
             {
                 DiscordStatusTracker.Initialize();
-                // DiscordCrashDetector.OnServerStart() removed — it was the
-                // legacy crash detector superseded by ServerHeartbeat
-                // (Modules/ClientLogRelay/Interactions/ServerHeartbeat.cs).
-                // Both wrote to the SAME sentinel file
-                // (BepInEx\config\FiresRPGmaker\server_heartbeat.json) but
-                // DiscordCrashDetector's JSON format omitted the "messageId"
-                // field that the server-wrapper bat reads to find the live
-                // Discord status message for restart-reaction polling. With
-                // both writers active, whichever wrote LAST on the path won
-                // — and OnApplicationQuit fired DiscordCrashDetector's
-                // WriteSentinel("stopped") AFTER ServerHeartbeat's, blowing
-                // away messageId and breaking the bat's "click restart in
-                // Discord" loop ("ERROR: No message ID in sentinel").
-                // ServerHeartbeat handles both sentinel writes AND its own
-                // PowerShell crash notifier, so DiscordCrashDetector is
-                // entirely redundant. Removing the call here disables the
-                // duplicate writer; the class itself stays in the tree
-                // pending the warnings-cleanup pass that deletes it.
+                // DiscordCrashDetector is deliberately not started: ServerHeartbeat
+                // owns the sentinel file and the crash notifier. A second writer
+                // would drop the "messageId" field the server-wrapper bat reads to
+                // find the live Discord status message for restart reactions.
                 DiscordIntegrationCore.OnServerStart();
                 DiscordBotListener.Start();
                 DiscordBridgeProvider.Start();   // Core's DiscordBridge: private tools post / watch channels as the bot
@@ -257,9 +246,15 @@ namespace FiresDiscordIntegration.Discord
                     return;
                 }
 
-                // A sender with no name in its UserInfo still has one on its peer (1.0.26).
-                string name = !string.IsNullOrEmpty(sender?.Name) ? sender.Name : PeerName(senderID);
+                // A sender with no name in its UserInfo still has one on its peer.
+                // Security: the name comes from the sender's connection (the packet's UserInfo can claim anyone).
+                string name = FiresDiscordIntegration.ChatRelay.ChatSecurity.SenderName(senderID, sender?.Name);
                 if (!RelayableChat(name, text, senderID)) return;
+                if (!FiresDiscordIntegration.ChatRelay.ChatSecurity.Allow(senderID))
+                {
+                    FiresLogger.LogWarning($"[Discord] chat rate limit hit for peer {senderID}; line not relayed.");
+                    return;
+                }
                 if (type == Talker.Type.Normal)
                 {
                     DiscordIntegrationCore.OnPlayerChat(name, text, DiscordIntegrationCore.ChatLineType.Say);
@@ -270,7 +265,7 @@ namespace FiresDiscordIntegration.Discord
                 }
                 else
                 {
-                    Debug.Log($"[Discord] Chat patch skipped: type {type} is not a relayable chat type (Ping ignored on purpose)");
+                    FiresLogger.LogDebug($"[Discord] Chat patch skipped: type {type} is not a relayable chat type (Ping ignored on purpose)");
                 }
             }
             catch (Exception ex)
@@ -279,11 +274,10 @@ namespace FiresDiscordIntegration.Discord
             }
         }
 
-        // A user's Linux dedicated server, via Fire: shouts never reached Discord while everything else did; it reproduced on our rig
-        // dedi (R38 on 1.0.26, R39 on 1.0.27). Valheim 1.0 sends a shout ONCE PER RECIPIENT: Chat.SendText ->
+        // Shouts need their own hooks. Valheim sends a shout ONCE PER RECIPIENT: Chat.SendText ->
         // CheckPermissionsAndSendChatMessageRPCsAsync -> InvokeRoutedRPC(recipient, "ChatMessage") for each permitted player. The
         // shouter's own copy never leaves its machine, and the server only routes the others on (RouteRPC), so the server's Chat
-        // never handles a shout. 1.0.28 relays shouts three ways, de-duplicated by RelayShout:
+        // never handles a shout. Shouts are relayed three ways, de-duplicated by RelayShout:
         // - the shouter's client sends it to the server (ChatRelayRpc, as Say/Whisper always were; needs FDI on that client);
         // - a copy the server routes on to another player (RouteRPC below; works for a client without FDI while anyone else is on);
         // - a copy the server itself handles (HandleRoutedRPC; a listen host's own shout).
@@ -332,20 +326,26 @@ namespace FiresDiscordIntegration.Discord
 
         internal static void RelayShout(string name, long senderPeer, string text, string via)
         {
-            if (string.IsNullOrEmpty(name)) name = PeerName(senderPeer);
+            // Security: the name comes from the sender's connection, never from the packet.
+            name = FiresDiscordIntegration.ChatRelay.ChatSecurity.SenderName(senderPeer, name);
             if (!RelayableChat(name, text, senderPeer)) return;
             float now = Time.realtimeSinceStartup;
             string key = name + "\n" + text;
             if (_recentShouts.TryGetValue(key, out float seen) && now - seen < ShoutDedupSeconds)
             {
-                // Said too, so a proof round shows every path that saw the shout, not only the one that posted it.
-                Debug.Log($"[Discord] shout from '{name}' (peer {senderPeer}) also arrived via {via}: already relayed, not posted again");
+                // Logged too, so the debug log shows every path that saw the shout, not only the one that posted it.
+                FiresLogger.LogDebug($"[Discord] shout from '{name}' (peer {senderPeer}) also arrived via {via}: already relayed, not posted again");
                 return;
             }
-            if (_recentShouts.Count > 64) _recentShouts.Clear();
+            if (_recentShouts.Count > MaxRecentShouts) _recentShouts.Clear();
             _recentShouts[key] = now;
+            if (!FiresDiscordIntegration.ChatRelay.ChatSecurity.Allow(senderPeer))
+            {
+                FiresLogger.LogWarning($"[Discord] shout rate limit hit for peer {senderPeer}; not relayed.");
+                return;
+            }
 
-            Debug.Log($"[Discord] shout from '{name}' (peer {senderPeer}) via {via}");
+            FiresLogger.LogDebug($"[Discord] shout from '{name}' (peer {senderPeer}) via {via}");
             DiscordStatusTracker.RecordShout();
             bool relays = DiscordIntegrationCore.WillRelay(DiscordIntegrationCore.ChatLineType.Shout, text);
             DiscordIntegrationCore.OnPlayerChat(name, text, DiscordIntegrationCore.ChatLineType.Shout);
@@ -444,8 +444,8 @@ namespace FiresDiscordIntegration.Discord
         // ────────────────────────────────────────────────────────────
 
         // SetRandomEvent is where vanilla starts and ends every random event ("Random event set:<name>" in the log); the
-        // server runs it whatever its clients have installed. 1.0.30 and older only watched SetActiveEvent, which gets an
-        // event only where a local player stands in the area - never on a dedicated server - so no raid was ever posted.
+        // server runs it whatever its clients have installed. SetActiveEvent is not enough: it only gets an event where a
+        // local player stands in the area, which never happens on a dedicated server.
         [HarmonyPatch(typeof(RandEventSystem), "SetRandomEvent")]
         [HarmonyPrefix]
         public static void RandEventSystem_SetRandomEvent_Prefix(RandomEvent ___m_randomEvent, out RandomEvent __state)
