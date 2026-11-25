@@ -128,17 +128,43 @@ namespace FiresDiscordIntegration.ChatRelay
             textRect.offsetMin = new Vector2( PanelHorizontalPaddingPx,  PanelVerticalPaddingPx);
             textRect.offsetMax = new Vector2(-PanelHorizontalPaddingPx, -PanelVerticalPaddingPx);
 
+            // 1.0.44 ([generator], lead 11-16): the text object is created INACTIVE, so TMP's Awake (which loads a default font when none is set,
+            // logged by FiresFixes as "Missing Font Fallback") does not run until the game's font is assigned. It activates once it has a font:
+            // here when one is already loaded, else in EnsureFontAssetReady from the chat output (the 1.0.43 path).
+            textGo.SetActive(false);
             _bodyText = textGo.AddComponent<TextMeshProUGUI>();
             _bodyText.fontSize     = FontSizePx;
             _bodyText.alignment    = TextAlignmentOptions.TopLeft;
             _bodyText.richText     = true;
             _bodyText.color        = Color.white;
             _bodyText.raycastTarget = false;
-            // Font asset is intentionally NOT assigned here — when the hint is
-            // built (Chat.Awake postfix), Valheim's chat output isn't always
-            // fully alive yet, and writing to TMP's preferredHeight without a
-            // bound font asset throws inside MaterialReference..ctor.  We pull
-            // the asset from chat.m_output the first time Update() finds it.
+            var font = FindGameFont(out Material material);
+            if (font != null) ApplyFont(font, material);
+        }
+
+        // The chat output's font (what the hint should match), else a loaded Averia font (Valheim's UI typeface), else any loaded TMP font.
+        // Called once, when the hint is built.
+        private static TMP_FontAsset FindGameFont(out Material material)
+        {
+            material = null;
+            var output = Chat.instance != null ? Chat.instance.m_output : null;
+            if (output != null && output.font != null) { material = output.fontSharedMaterial; return output.font; }
+            TMP_FontAsset any = null;
+            foreach (var f in Resources.FindObjectsOfTypeAll<TMP_FontAsset>())
+            {
+                if (f == null) continue;
+                if (f.name.IndexOf("Averia", System.StringComparison.OrdinalIgnoreCase) >= 0) return f;
+                if (any == null) any = f;
+            }
+            return any;
+        }
+
+        private void ApplyFont(TMP_FontAsset font, Material material)
+        {
+            _bodyText.font = font;
+            if (material != null) _bodyText.fontSharedMaterial = material;
+            _fontAssetReady = true;
+            if (!_bodyText.gameObject.activeSelf) _bodyText.gameObject.SetActive(true);
         }
 
         // Inherits the font asset + material from the live chat output so the
@@ -159,10 +185,7 @@ namespace FiresDiscordIntegration.ChatRelay
             var font = output.font;
             if (font == null) return false;
 
-            _bodyText.font = font;
-            var sharedMat = output.fontSharedMaterial;
-            if (sharedMat != null) _bodyText.fontSharedMaterial = sharedMat;
-            _fontAssetReady = true;
+            ApplyFont(font, output.fontSharedMaterial);   // 1.0.44: also activates the text object
             return true;
         }
 

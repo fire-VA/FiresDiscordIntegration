@@ -387,6 +387,9 @@ namespace FiresDiscordIntegration.ChatRelay
         [HarmonyPostfix]
         private static void Chat_Awake_Postfix()
         {
+            // 1.0.44 ([generator], lead 11-16 VA DN dedi log :284 "Missing Font Fallback: text 'FiresDiscord_MentionHint/Panel/Text' came with no
+            // font"): a dedicated server / batch-mode process has a Chat but no screen, fonts or player typing, so the hint overlay is never built there
+            if (Application.isBatchMode || SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null) return;
             try { ChatMentionHint.EnsureCreated(); }
             catch (System.Exception ex)
             {

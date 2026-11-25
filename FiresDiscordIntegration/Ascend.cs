@@ -43,7 +43,7 @@ namespace FiresDiscordIntegration
     {
         public const string PluginGUID    = "com.Fire.FiresDiscordIntegration";
         public const string PluginName    = "FiresDiscordIntegration";
-        public const string PluginVersion = "1.0.43";
+        public const string PluginVersion = "1.0.44";   // 1.0.44 ([generator], lead 11-16 VA DN dedi warning "Missing Font Fallback: FiresDiscord_MentionHint/Panel/Text"): the @mention hint is never built on a dedicated server / batch-mode process (ChatPatches Chat.Awake postfix), and on clients its text gets the game font before it activates (ChatMentionHint.FindGameFont / ApplyFont) instead of starting font-less.
 
         public static FiresDiscordIntegrationPlugin Instance;
         public static readonly Harmony Harmony = new Harmony(PluginGUID);

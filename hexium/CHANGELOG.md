@@ -1,3 +1,16 @@
+## 1.0.44
+
+### Fixed
+- The chat window parts are no longer built on a dedicated server.
+- The @mention hint uses the game's chat font (no more missing-font warning).
+
+## 1.0.43
+- The [Discord] entry in the player list only shows when the bot listener is on and a real player is online.
+- Smoother chat while typing @mentions.
+
+## 1.0.41
+- Bug fixes and improvements.
+
 ## 1.0.36
 - Tidier settings: webhooks and IDs are under Show Advanced and test keys are hidden.
 - Chat relay and Discord role names keep working after a relog.
@@ -18,6 +31,4 @@
 - Screenshots posted to Discord on death (captioned with the cause of death), on achievements, and on skill level-ups.
 - Expand World Prefabs can trigger a screenshot with a `screenshot` poke on a player.
 - All screenshots go to one webhook (ScreenshotsWebhookUrl), falling back to the general webhook. Each source has its own toggle, all on by default.
-
-## 1.0.0
 - First release.
